@@ -20,7 +20,7 @@ export class BaggageHandlingSystem extends BaseBaggageHandlingSystem {
     const hasBaggageStaff = Boolean(system?.listEmployees?.().some((employee) => ['BaggageHandler', 'BaggageSupervisor', 'GroundHandler'].includes(employee.roleId)));
     if (!hasBaggageStaff) {
       const configured = { BAGGAGE_DROP_QUEUE: this.config.queues.drop.serverCount, BAGGAGE_SCREENING_QUEUE: this.config.queues.screening.serverCount, BAGGAGE_SORTING_QUEUE: this.config.queues.sorting.serverCount, BAGGAGE_TRANSFER_SORTING_QUEUE: this.config.queues.transferSorting.serverCount, BAGGAGE_LOADING_QUEUE: this.config.loading.serverCount, BAGGAGE_UNLOAD_QUEUE: this.config.unloading.serverCount };
-      for (const [queueId, serverCount] of Object.entries(configured)) { const queue = this.queueEngine.getQueue(queueId); if (queue) { this.queueEngine.updateServiceCapacity(queueId, { serverCount, serviceRateMultiplier: 1 }); queue.serviceTime = queueId === 'BAGGAGE_UNLOAD_QUEUE' ? 2 : (queueId === 'BAGGAGE_LOADING_QUEUE' ? 2 : 1); } }
+      for (const [queueId, serverCount] of Object.entries(configured)) { const queue = this.queueEngine.getQueue(queueId); if (queue) { this.queueEngine.updateServiceCapacity(queueId, { serverCount, serviceRateMultiplier: 1 }); queue.serviceTime = queueId === 'BAGGAGE_UNLOAD_QUEUE' ? 2 : (queueId === 'BAGGAGE_LOADING_QUEUE' ? 2 : (queueId === 'BAGGAGE_SCREENING_QUEUE' ? 2 : 1)); } }
     }
     return result;
   }
@@ -39,7 +39,7 @@ export class BaggageHandlingSystem extends BaseBaggageHandlingSystem {
     return result;
   }
   #stabilizeQueues() {
-    const fixedTimes = { BAGGAGE_DROP_QUEUE: 1, BAGGAGE_SCREENING_QUEUE: 1, BAGGAGE_SORTING_QUEUE: 1, BAGGAGE_TRANSFER_SORTING_QUEUE: 1, BAGGAGE_LOADING_QUEUE: 2, BAGGAGE_UNLOAD_QUEUE: 2 };
+    const fixedTimes = { BAGGAGE_DROP_QUEUE: 1, BAGGAGE_SCREENING_QUEUE: 2, BAGGAGE_SORTING_QUEUE: 1, BAGGAGE_TRANSFER_SORTING_QUEUE: 1, BAGGAGE_LOADING_QUEUE: 2, BAGGAGE_UNLOAD_QUEUE: 2 };
     for (const [id, minutes] of Object.entries(fixedTimes)) { const q = this.queueEngine.getQueue(id); if (q) q.serviceTime = minutes; }
     const sorting = this.queueEngine.getQueue('BAGGAGE_SORTING_QUEUE');
     if (sorting?.processor && !sorting.processor.__stage9Wrapped) {
@@ -48,16 +48,9 @@ export class BaggageHandlingSystem extends BaseBaggageHandlingSystem {
       sorting.processor.__stage9Wrapped = true;
     }
     const transfer = this.queueEngine.getQueue('BAGGAGE_TRANSFER_SORTING_QUEUE');
-    if (transfer?.processor && !transfer.processor.__stage9Wrapped) {
-      const original = transfer.processor.onComplete;
-      transfer.processor.onComplete = (b, at) => { original?.(b, at); if (b.currentStatus !== BAGGAGE_STATUSES.CONNECTING_FLIGHT) b.transitionTo(BAGGAGE_STATUSES.CONNECTING_FLIGHT, { at, zone: 'CONNECTING_FLIGHT', flow: 'TRANSFER', force: true }); };
-      transfer.processor.__stage9Wrapped = true;
-    }
+    if (transfer?.processor && !transfer.processor.__stage9Wrapped) { const original = transfer.processor.onComplete; transfer.processor.onComplete = (b, at) => { original?.(b, at); if (b.currentStatus !== BAGGAGE_STATUSES.CONNECTING_FLIGHT) b.transitionTo(BAGGAGE_STATUSES.CONNECTING_FLIGHT, { at, zone: 'CONNECTING_FLIGHT', flow: 'TRANSFER', force: true }); }; transfer.processor.__stage9Wrapped = true; }
     const unload = this.queueEngine.getQueue('BAGGAGE_UNLOAD_QUEUE');
-    if (unload?.processor && !unload.processor.__stage9Wrapped) {
-      unload.processor.onComplete = (b, at) => { b.transitionTo(BAGGAGE_STATUSES.UNLOADING, { at, zone: 'BHS', flow: 'ARRIVAL', force: true }); b.transitionTo(BAGGAGE_STATUSES.TRANSFER_TO_BAGGAGE_CLAIM, { at, zone: 'BAGGAGE_CLAIM', flow: 'ARRIVAL', force: true }); b.transitionTo(BAGGAGE_STATUSES.BAGGAGE_CLAIM, { at, zone: 'BAGGAGE_CLAIM', flow: 'ARRIVAL', force: true }); this.simulation.schedule({ at: new Date(new Date(at).getTime() + 2 * 60000), type: 'baggage.claim.completed', payload: { baggageId: b.baggageId }, handler: ({ event }) => { const bag = this.getBaggage(event.payload.baggageId); if (bag) bag.transitionTo(BAGGAGE_STATUSES.CLAIMED, { at: event.at, zone: 'ARRIVAL_HALL', flow: 'ARRIVAL', force: true }); } }); };
-      unload.processor.__stage9Wrapped = true;
-    }
+    if (unload?.processor && !unload.processor.__stage9Wrapped) { unload.processor.onComplete = (b, at) => { b.transitionTo(BAGGAGE_STATUSES.UNLOADING, { at, zone: 'BHS', flow: 'ARRIVAL', force: true }); b.transitionTo(BAGGAGE_STATUSES.TRANSFER_TO_BAGGAGE_CLAIM, { at, zone: 'BAGGAGE_CLAIM', flow: 'ARRIVAL', force: true }); b.transitionTo(BAGGAGE_STATUSES.BAGGAGE_CLAIM, { at, zone: 'BAGGAGE_CLAIM', flow: 'ARRIVAL', force: true }); this.simulation.schedule({ at: new Date(new Date(at).getTime() + 2 * 60000), type: 'baggage.claim.completed', payload: { baggageId: b.baggageId }, handler: ({ event }) => { const bag = this.getBaggage(event.payload.baggageId); if (bag) bag.transitionTo(BAGGAGE_STATUSES.CLAIMED, { at: event.at, zone: 'ARRIVAL_HALL', flow: 'ARRIVAL', force: true }); } }); }; unload.processor.__stage9Wrapped = true; }
   }
 }
 export { GroundTask, GroundResource, GROUND_TASK_STATUS, GROUND_TASK_TYPES, GROUND_RESOURCE_TYPES, GROUND_RESOURCE_STATUS } from '../ground/model.js';
