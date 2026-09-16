@@ -1,5 +1,7 @@
 import { FLIGHT_STATUSES } from './model.js';
 
+const EVENT_TOLERANCE_MS = 1;
+
 export class FlightSimulationSystem {
   #flights = new Map();
   #scheduledEventIds = new Map();
@@ -33,27 +35,33 @@ export class FlightSimulationSystem {
     if (flight.scheduledArrival) {
       this.#scheduleAt(flight, flight.estimatedArrival ?? flight.scheduledArrival, 'flight.approach', ({ event }) => {
         const current = this.#requireFlight(event.payload.flightId);
+        const expected = current.estimatedArrival ?? current.scheduledArrival;
+        if (!expected || this.#isStale(event.at, expected)) {
+          if (expected && expected.getTime() > event.at.getTime()) {
+            this.#scheduleAt(current, expected, 'flight.approach', arguments.callee);
+          }
+          return;
+        }
         if (current.status === FLIGHT_STATUSES.SCHEDULED || current.status === FLIGHT_STATUSES.DELAYED) {
-          current.transitionTo(FLIGHT_STATUSES.APPROACHING, { at: event.at, reason: 'scheduled arrival reached' });
+          current.transitionTo(FLIGHT_STATUSES.APPROACHING, { at: event.at, reason: 'estimated arrival reached' });
         }
       });
 
-      const landedAt = new Date((flight.estimatedArrival ?? flight.scheduledArrival).getTime());
-      landedAt.setMinutes(landedAt.getMinutes() + 5);
-      this.#scheduleAt(flight, landedAt, 'flight.landed', ({ event }) => {
-        const current = this.#requireFlight(event.payload.flightId);
-        if (current.status === FLIGHT_STATUSES.APPROACHING || current.status === FLIGHT_STATUSES.DELAYED) {
-          current.transitionTo(FLIGHT_STATUSES.LANDED, { at: event.at, reason: 'arrival event completed' });
-          this.#scheduleGroundPhases(current, event.at);
-        }
-      });
+      this.#scheduleLandingEvent(flight, flight.estimatedArrival ?? flight.scheduledArrival);
     }
 
     if (flight.scheduledDeparture) {
       this.#scheduleAt(flight, flight.estimatedDeparture ?? flight.scheduledDeparture, 'flight.departure', ({ event }) => {
         const current = this.#requireFlight(event.payload.flightId);
-        if (current.status === FLIGHT_STATUSES.READY || current.status === FLIGHT_STATUSES.AT_GATE || current.status === FLIGHT_STATUSES.BOARDING || current.status === FLIGHT_STATUSES.DELAYED) {
-          current.transitionTo(FLIGHT_STATUSES.DEPARTING, { at: event.at, reason: 'scheduled departure reached' });
+        const expected = current.estimatedDeparture ?? current.scheduledDeparture;
+        if (!expected || this.#isStale(event.at, expected)) {
+          if (expected && expected.getTime() > event.at.getTime()) {
+            this.#scheduleAt(current, expected, 'flight.departure', arguments.callee);
+          }
+          return;
+        }
+        if ([FLIGHT_STATUSES.READY, FLIGHT_STATUSES.AT_GATE, FLIGHT_STATUSES.BOARDING, FLIGHT_STATUSES.DELAYED].includes(current.status)) {
+          current.transitionTo(FLIGHT_STATUSES.DEPARTING, { at: event.at, reason: 'estimated departure reached' });
           const airborneAt = new Date(event.at.getTime() + 5 * 60_000);
           this.#scheduleAt(current, airborneAt, 'flight.airborne', ({ event: airborneEvent }) => {
             const latest = this.#requireFlight(airborneEvent.payload.flightId);
@@ -64,6 +72,24 @@ export class FlightSimulationSystem {
         }
       });
     }
+  }
+
+  #scheduleLandingEvent(flight, arrivalTime) {
+    const landedAt = new Date(arrivalTime.getTime() + 5 * 60_000);
+    this.#scheduleAt(flight, landedAt, 'flight.landed', ({ event }) => {
+      const current = this.#requireFlight(event.payload.flightId);
+      const expectedArrival = current.estimatedArrival ?? current.scheduledArrival;
+      if (!expectedArrival) return;
+      const expectedLandedAt = new Date(expectedArrival.getTime() + 5 * 60_000);
+      if (this.#isStale(event.at, expectedLandedAt)) {
+        if (expectedLandedAt.getTime() > event.at.getTime()) this.#scheduleLandingEvent(current, expectedArrival);
+        return;
+      }
+      if (current.status === FLIGHT_STATUSES.APPROACHING || current.status === FLIGHT_STATUSES.DELAYED) {
+        current.transitionTo(FLIGHT_STATUSES.LANDED, { at: event.at, reason: 'arrival completed' });
+        this.#scheduleGroundPhases(current, event.at);
+      }
+    });
   }
 
   #scheduleGroundPhases(flight, landedAt) {
@@ -93,15 +119,14 @@ export class FlightSimulationSystem {
   }
 
   #scheduleAt(flight, at, type, handler) {
-    const eventId = this.simulation.schedule({
-      at,
-      type,
-      payload: { flightId: flight.flightId },
-      handler,
-    });
+    const eventId = this.simulation.schedule({ at, type, payload: { flightId: flight.flightId }, handler });
     if (!this.#scheduledEventIds.has(flight.flightId)) this.#scheduledEventIds.set(flight.flightId, []);
     this.#scheduledEventIds.get(flight.flightId).push(eventId);
     return eventId;
+  }
+
+  #isStale(eventAt, expectedAt) {
+    return Math.abs(eventAt.getTime() - expectedAt.getTime()) > EVENT_TOLERANCE_MS;
   }
 
   #requireFlight(flightId) {
