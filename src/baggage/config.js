@@ -14,6 +14,7 @@ export const BAGGAGE_CONFIG = Object.freeze({
     drop: Object.freeze({ serverCount: 6, capacity: 10000, serviceTimeMinutes: [1, 2] }),
     screening: Object.freeze({ serverCount: 4, capacity: 10000, serviceTimeMinutes: [0.5, 1.5] }),
     sorting: Object.freeze({ serverCount: 6, capacity: 10000, serviceTimeMinutes: [0.5, 2] }),
+    transferSorting: Object.freeze({ serverCount: 3, capacity: 10000, serviceTimeMinutes: [0.5, 2] }),
   }),
   loading: Object.freeze({ cutoffMinutes: 25, serverCount: 6, capacity: 10000, serviceTimeMinutes: [1, 3] }),
   unloading: Object.freeze({ serverCount: 6, capacity: 10000, serviceTimeMinutes: [1, 3] }),
@@ -21,4 +22,4 @@ export const BAGGAGE_CONFIG = Object.freeze({
   routing: Object.freeze({ correctRouteProbability: 0.995, transferPriority: 30, tightConnectionPriority: 50, specialPriority: 20 }),
   priority: Object.freeze({ base: 0, connectionUrgencyWeight: 1, transferPenaltyWeight: 1, departureUrgencyWeight: 1 }),
 });
-export const BHS_SERVICE_TYPES = Object.freeze({ DROP: 'baggage-drop', SCREENING: 'baggage-screening', SORTING: 'baggage-sorting', LOADING: 'baggage-loading', UNLOADING: 'baggage-unloading' });
+export const BHS_SERVICE_TYPES = Object.freeze({ DROP: 'baggage-drop', SCREENING: 'baggage-screening', SORTING: 'baggage-sorting', TRANSFER_SORTING: 'baggage-transfer-sorting', LOADING: 'baggage-loading', UNLOADING: 'baggage-unloading' });
