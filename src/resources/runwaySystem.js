@@ -6,6 +6,7 @@ export class RunwaySystem {
   #landingQueue = [];
   #departureQueue = [];
   #sequence = 0;
+  #retryScheduled = false;
 
   constructor(simulation, { weights = RUNWAY_PRIORITY_WEIGHTS } = {}) {
     if (!simulation || typeof simulation.schedule !== 'function') throw new TypeError('A SimulationCore-compatible instance is required.');
@@ -32,27 +33,24 @@ export class RunwaySystem {
     return this.#request(flight, RUNWAY_REQUEST_TYPES.DEPARTURE, onStart, onRelease);
   }
 
+  cancelRequests(flightId) {
+    const before = this.#landingQueue.length + this.#departureQueue.length;
+    this.#landingQueue = this.#landingQueue.filter((request) => request.flight.flightId !== flightId);
+    this.#departureQueue = this.#departureQueue.filter((request) => request.flight.flightId !== flightId);
+    return before !== this.#landingQueue.length + this.#departureQueue.length;
+  }
+
   getLandingQueue() { return this.#landingQueue.map(this.#queueView); }
   getDepartureQueue() { return this.#departureQueue.map(this.#queueView); }
 
   getStatus() {
-    return this.getRunways().map((runway) => ({
-      runwayId: runway.runwayId,
-      status: runway.status,
-      currentFlightId: runway.currentFlightId,
-      occupancyStart: runway.occupancyStart,
-      occupancyEnd: runway.occupancyEnd,
-    }));
+    return this.getRunways().map((runway) => ({ runwayId: runway.runwayId, status: runway.status, currentFlightId: runway.currentFlightId, occupancyStart: runway.occupancyStart, occupancyEnd: runway.occupancyEnd }));
   }
 
   detectConflicts() {
-    const conflicts = [];
-    for (const runway of this.getRunways()) {
-      if (runway.status === RUNWAY_STATUSES.OCCUPIED && runway.currentFlightId) {
-        conflicts.push({ runwayId: runway.runwayId, flightId: runway.currentFlightId, occupancyStart: runway.occupancyStart, occupancyEnd: runway.occupancyEnd });
-      }
-    }
-    return conflicts;
+    return this.getRunways()
+      .filter((runway) => runway.status === RUNWAY_STATUSES.OCCUPIED && runway.currentFlightId)
+      .map((runway) => ({ runwayId: runway.runwayId, flightId: runway.currentFlightId, occupancyStart: runway.occupancyStart, occupancyEnd: runway.occupancyEnd }));
   }
 
   #request(flight, type, onStart, onRelease) {
@@ -63,7 +61,7 @@ export class RunwaySystem {
       type,
       requestedAt: new Date(now),
       scheduledAt: new Date(type === RUNWAY_REQUEST_TYPES.LANDING ? (flight.estimatedArrival ?? flight.scheduledArrival ?? now) : (flight.estimatedDeparture ?? flight.scheduledDeparture ?? now)),
-      priority: calculateRunwayPriority(flight, now, type),
+      priority: calculateRunwayPriority(flight, now, type, now),
       onStart,
       onRelease,
     };
@@ -72,13 +70,14 @@ export class RunwaySystem {
     if (runway) return this.#startRequest(request, runway);
 
     this.#queueFor(type).push(request);
-    this.#sortQueues();
+    this.#sortQueues(now);
     this.simulation.logger.info('RunwayRequestQueuedEvent', {
       requestId: request.id,
       flightId: flight.flightId,
       requestType: type,
       queue: type === RUNWAY_REQUEST_TYPES.LANDING ? 'LandingQueue' : 'DepartureQueue',
     });
+    this.#ensureRetryScheduled(now);
     return { queued: true, requestId: request.id, queue: type === RUNWAY_REQUEST_TYPES.LANDING ? 'LandingQueue' : 'DepartureQueue' };
   }
 
@@ -88,7 +87,11 @@ export class RunwaySystem {
     if (waitMinutes > 0) request.flight.recordDelay(Math.ceil(waitMinutes), { at: now, reason: `${request.type.toLowerCase()} runway queue` });
 
     const end = new Date(now.getTime() + operationDuration(request.type));
-    if (!runway.reserve(request.flight.flightId, now, end)) return this.#request(request.flight, request.type, request.onStart, request.onRelease);
+    if (!runway.reserve(request.flight.flightId, now, end)) {
+      this.#queueFor(request.type).push(request);
+      this.#ensureRetryScheduled(now);
+      return { queued: true, requestId: request.id, queue: request.type === RUNWAY_REQUEST_TYPES.LANDING ? 'LandingQueue' : 'DepartureQueue' };
+    }
     runway.occupy(request.flight.flightId, now);
 
     this.simulation.logger.info('RunwayReservedEvent', { runwayId: runway.runwayId, flightId: request.flight.flightId, requestType: request.type });
@@ -113,6 +116,8 @@ export class RunwaySystem {
   }
 
   #processQueues(at) {
+    this.#retryScheduled = false;
+    this.#refreshPriorities(at);
     let progressed = true;
     while (progressed) {
       progressed = false;
@@ -126,10 +131,25 @@ export class RunwaySystem {
         break;
       }
     }
-    this.#sortQueues();
-    if (this.#landingQueue.length || this.#departureQueue.length) {
-      this.simulation.schedule({ at: new Date(at.getTime() + RESOURCE_RETRY_INTERVAL_MS), type: 'runway.queue.retry', payload: {}, handler: () => this.#processQueues(this.simulation.getSnapshot().currentTime) });
+    this.#refreshPriorities(at);
+    if (this.#landingQueue.length || this.#departureQueue.length) this.#ensureRetryScheduled(at);
+  }
+
+  #refreshPriorities(now) {
+    for (const request of [...this.#landingQueue, ...this.#departureQueue]) {
+      request.priority = calculateRunwayPriority(request.flight, request.requestedAt, request.type, now);
     }
+  }
+
+  #ensureRetryScheduled(at) {
+    if (this.#retryScheduled || (!this.#landingQueue.length && !this.#departureQueue.length)) return;
+    this.#retryScheduled = true;
+    this.simulation.schedule({
+      at: new Date(new Date(at).getTime() + RESOURCE_RETRY_INTERVAL_MS),
+      type: 'runway.queue.retry',
+      payload: {},
+      handler: ({ event }) => this.#processQueues(event.at),
+    });
   }
 
   #findAvailableRunway(type) {
@@ -142,8 +162,8 @@ export class RunwaySystem {
 
   #queueFor(type) { return type === RUNWAY_REQUEST_TYPES.LANDING ? this.#landingQueue : this.#departureQueue; }
   #removeRequest(id) { this.#landingQueue = this.#landingQueue.filter((item) => item.id !== id); this.#departureQueue = this.#departureQueue.filter((item) => item.id !== id); }
-  #sortQueues() { this.#landingQueue.sort(RunwaySystem.#compareRequests); this.#departureQueue.sort(RunwaySystem.#compareRequests); }
-  #queueView(request) { return { id: request.id, flightId: request.flight.flightId, type: request.type, requestedAt: request.requestedAt, scheduledAt: request.scheduledAt, priority: request.priority }; }
+  #sortQueues(now) { this.#refreshPriorities(now); this.#landingQueue.sort(RunwaySystem.#compareRequests); this.#departureQueue.sort(RunwaySystem.#compareRequests); }
+  #queueView = (request) => ({ id: request.id, flightId: request.flight.flightId, type: request.type, requestedAt: request.requestedAt, scheduledAt: request.scheduledAt, priority: request.priority });
 
   static #compareRequests(a, b) {
     if (b.priority !== a.priority) return b.priority - a.priority;
