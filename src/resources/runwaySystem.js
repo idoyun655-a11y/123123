@@ -25,13 +25,8 @@ export class RunwaySystem {
   getRunway(runwayId) { return this.#runways.get(runwayId) ?? null; }
   getRunways() { return [...this.#runways.values()]; }
 
-  requestLanding(flight, { onStart = null, onRelease = null } = {}) {
-    return this.#request(flight, RUNWAY_REQUEST_TYPES.LANDING, onStart, onRelease);
-  }
-
-  requestDeparture(flight, { onStart = null, onRelease = null } = {}) {
-    return this.#request(flight, RUNWAY_REQUEST_TYPES.DEPARTURE, onStart, onRelease);
-  }
+  requestLanding(flight, { onStart = null, onRelease = null } = {}) { return this.#request(flight, RUNWAY_REQUEST_TYPES.LANDING, onStart, onRelease); }
+  requestDeparture(flight, { onStart = null, onRelease = null } = {}) { return this.#request(flight, RUNWAY_REQUEST_TYPES.DEPARTURE, onStart, onRelease); }
 
   cancelRequests(flightId) {
     const before = this.#landingQueue.length + this.#departureQueue.length;
@@ -55,13 +50,14 @@ export class RunwaySystem {
 
   #request(flight, type, onStart, onRelease) {
     const now = this.simulation.getSnapshot().currentTime;
+    const scheduledAt = type === RUNWAY_REQUEST_TYPES.LANDING ? (flight.estimatedArrival ?? flight.scheduledArrival ?? now) : (flight.estimatedDeparture ?? flight.scheduledDeparture ?? now);
     const request = {
       id: `runway-request-${++this.#sequence}`,
       flight,
       type,
       requestedAt: new Date(now),
-      scheduledAt: new Date(type === RUNWAY_REQUEST_TYPES.LANDING ? (flight.estimatedArrival ?? flight.scheduledArrival ?? now) : (flight.estimatedDeparture ?? flight.scheduledDeparture ?? now)),
-      priority: calculateRunwayPriority(flight, now, type, now),
+      scheduledAt: new Date(scheduledAt),
+      priority: calculateRunwayPriority(flight, now, type, now, this.weights),
       onStart,
       onRelease,
     };
@@ -71,12 +67,7 @@ export class RunwaySystem {
 
     this.#queueFor(type).push(request);
     this.#sortQueues(now);
-    this.simulation.logger.info('RunwayRequestQueuedEvent', {
-      requestId: request.id,
-      flightId: flight.flightId,
-      requestType: type,
-      queue: type === RUNWAY_REQUEST_TYPES.LANDING ? 'LandingQueue' : 'DepartureQueue',
-    });
+    this.simulation.logger.info('RunwayRequestQueuedEvent', { requestId: request.id, flightId: flight.flightId, requestType: type, queue: type === RUNWAY_REQUEST_TYPES.LANDING ? 'LandingQueue' : 'DepartureQueue' });
     this.#ensureRetryScheduled(now);
     return { queued: true, requestId: request.id, queue: type === RUNWAY_REQUEST_TYPES.LANDING ? 'LandingQueue' : 'DepartureQueue' };
   }
@@ -136,20 +127,13 @@ export class RunwaySystem {
   }
 
   #refreshPriorities(now) {
-    for (const request of [...this.#landingQueue, ...this.#departureQueue]) {
-      request.priority = calculateRunwayPriority(request.flight, request.requestedAt, request.type, now);
-    }
+    for (const request of [...this.#landingQueue, ...this.#departureQueue]) request.priority = calculateRunwayPriority(request.flight, request.requestedAt, request.type, now, this.weights);
   }
 
   #ensureRetryScheduled(at) {
     if (this.#retryScheduled || (!this.#landingQueue.length && !this.#departureQueue.length)) return;
     this.#retryScheduled = true;
-    this.simulation.schedule({
-      at: new Date(new Date(at).getTime() + RESOURCE_RETRY_INTERVAL_MS),
-      type: 'runway.queue.retry',
-      payload: {},
-      handler: ({ event }) => this.#processQueues(event.at),
-    });
+    this.simulation.schedule({ at: new Date(new Date(at).getTime() + RESOURCE_RETRY_INTERVAL_MS), type: 'runway.queue.retry', payload: {}, handler: ({ event }) => this.#processQueues(event.at) });
   }
 
   #findAvailableRunway(type) {
