@@ -17,12 +17,8 @@ export class EventQueue {
       handler: event.handler,
     };
 
-    if (Number.isNaN(normalized.at.getTime())) {
-      throw new TypeError('Scheduled event time must be a valid Date or date string.');
-    }
-    if (typeof normalized.handler !== 'function') {
-      throw new TypeError('Scheduled event handler must be a function.');
-    }
+    if (Number.isNaN(normalized.at.getTime())) throw new TypeError('Scheduled event time must be a valid Date or date string.');
+    if (typeof normalized.handler !== 'function') throw new TypeError('Scheduled event handler must be a function.');
 
     this.#events.push(normalized);
     this.#events.sort(EventQueue.#compare);
@@ -35,9 +31,7 @@ export class EventQueue {
   drainDue(now) {
     const current = now instanceof Date ? now.getTime() : new Date(now).getTime();
     const due = [];
-    while (this.#events.length > 0 && this.#events[0].at.getTime() <= current) {
-      due.push(this.#events.shift());
-    }
+    while (this.#events.length > 0 && this.#events[0].at.getTime() <= current) due.push(this.#events.shift());
     return due;
   }
 
@@ -45,13 +39,7 @@ export class EventQueue {
   get size() { return this.#events.length; }
 
   snapshot() {
-    return this.#events.map((event) => ({
-      id: event.id,
-      at: new Date(event.at),
-      priority: event.priority,
-      type: event.type,
-      payload: event.payload,
-    }));
+    return this.#events.map((event) => ({ id: event.id, at: new Date(event.at), priority: event.priority, type: event.type, payload: event.payload }));
   }
 
   static #compare(a, b) {
