@@ -69,6 +69,20 @@ test('delay updates estimated times and marks flight delayed', () => {
   assert.equal(flight.estimatedDeparture.toISOString(), '2026-01-01T02:00:00.000Z');
 });
 
+test('delayed arrival is not processed at the original schedule', () => {
+  const simulation = new SimulationCore({ startDate: START });
+  const flights = new FlightSimulationSystem(simulation);
+  const flight = makeFlight();
+  flights.addFlight(flight);
+  flight.recordDelay(20, { at: START, reason: 'weather delay' });
+  simulation.resume();
+
+  simulation.tick(15 * 60_000);
+  assert.equal(flight.status, FLIGHT_STATUSES.DELAYED);
+  simulation.tick(15 * 60_000);
+  assert.equal(flight.status, FLIGHT_STATUSES.APPROACHING);
+});
+
 test('cancelled flight cannot re-enter the lifecycle', () => {
   const simulation = new SimulationCore({ startDate: START });
   const flights = new FlightSimulationSystem(simulation);
