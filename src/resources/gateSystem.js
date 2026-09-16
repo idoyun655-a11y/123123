@@ -66,6 +66,28 @@ export class GateSystem {
     return result;
   }
 
+  waitForGate(flight, onAssigned) {
+    const immediate = this.assignBestGate(flight);
+    if (immediate.assigned) {
+      onAssigned?.(immediate);
+      return immediate;
+    }
+    const current = this.#waiters.get(flight.flightId);
+    if (current) current.onAssigned = onAssigned;
+    else this.#waiters.set(flight.flightId, { flight, onAssigned });
+    const now = this.simulation.getSnapshot().currentTime;
+    const waitUntil = immediate.waitUntil ?? new Date(now.getTime() + RESOURCE_RETRY_INTERVAL_MS);
+    const waitMinutes = Math.ceil(Math.max(0, waitUntil.getTime() - now.getTime()) / 60_000);
+    if (waitMinutes > 0) flight.recordDelay(waitMinutes, { at: now, reason: 'gate waiting' });
+    this.#scheduleRetry(flight, waitUntil);
+    return { ...immediate, waiting: true, waitUntil };
+  }
+
+  checkReservationConflict(gateId, start, end, flightId = null) {
+    const gate = this.#requireGate(gateId);
+    return gate.conflicts(start, end, flightId);
+  }
+
   occupyGate(flightId, at = this.simulation.getSnapshot().currentTime) {
     const flightGate = this.#findGateByFlight(flightId);
     if (!flightGate || !flightGate.occupy(flightId, at)) return false;
@@ -110,7 +132,7 @@ export class GateSystem {
   getStatus() { return this.getGates().map((gate) => ({ gateId: gate.gateId, status: gate.status, currentFlightId: gate.currentFlightId, estimatedReleaseTime: gate.estimatedReleaseTime })); }
 
   processWaiting(at = this.simulation.getSnapshot().currentTime) {
-    for (const [flightId, waiter] of this.#waiters) {
+    for (const [flightId, waiter] of [...this.#waiters]) {
       const result = this.assignBestGate(waiter.flight, { at });
       if (result.assigned) {
         this.#waiters.delete(flightId);
@@ -120,22 +142,27 @@ export class GateSystem {
   }
 
   #scheduleRetry(flight, waitUntil) {
-    if (this.#waiters.has(flight.flightId)) return;
-    this.#waiters.set(flight.flightId, { flight, onAssigned: null });
-    const retryAt = waitUntil > this.simulation.getSnapshot().currentTime ? waitUntil : new Date(this.simulation.getSnapshot().currentTime.getTime() + RESOURCE_RETRY_INTERVAL_MS);
+    if (this.#waiters.has(flight.flightId) && this.#waiters.get(flight.flightId).retryScheduled) return;
+    if (!this.#waiters.has(flight.flightId)) this.#waiters.set(flight.flightId, { flight, onAssigned: null });
+    const waiter = this.#waiters.get(flight.flightId);
+    waiter.retryScheduled = true;
+    const now = this.simulation.getSnapshot().currentTime;
+    const requested = new Date(waitUntil);
+    const retryAt = requested > now ? requested : new Date(now.getTime() + RESOURCE_RETRY_INTERVAL_MS);
     this.simulation.schedule({
       at: retryAt,
       type: 'gate.assignment.retry',
       payload: { flightId: flight.flightId },
       handler: ({ event }) => {
-        const waiter = this.#waiters.get(event.payload.flightId);
-        if (!waiter) return;
-        const result = this.assignBestGate(waiter.flight, { at: event.at });
+        const currentWaiter = this.#waiters.get(event.payload.flightId);
+        if (!currentWaiter) return;
+        currentWaiter.retryScheduled = false;
+        const result = this.assignBestGate(currentWaiter.flight, { at: event.at });
         if (result.assigned) {
-          this.#waiters.delete(waiter.flight.flightId);
-          waiter.onAssigned?.(result);
+          this.#waiters.delete(currentWaiter.flight.flightId);
+          currentWaiter.onAssigned?.(result);
         } else {
-          this.#scheduleRetry(waiter.flight, result.waitUntil ?? new Date(event.at.getTime() + RESOURCE_RETRY_INTERVAL_MS));
+          this.#scheduleRetry(currentWaiter.flight, result.waitUntil ?? new Date(event.at.getTime() + RESOURCE_RETRY_INTERVAL_MS));
         }
       },
     });
@@ -152,7 +179,6 @@ export class GateSystem {
     if (requirements.internationalDomestic && gate.internationalDomestic && requirements.internationalDomestic !== gate.internationalDomestic) return false;
     if (requirements.requiresJetBridge === true && gate.jetBridge !== true) return false;
     if (requirements.requiresBusGate === true && gate.busGate !== true) return false;
-
     if (Array.isArray(gate.compatibleAircraft) && gate.compatibleAircraft.length > 0 && !gate.compatibleAircraft.includes(flight.aircraftType)) return false;
     if (requirements.aircraftSize && gate.properties?.aircraftSizes && !gate.properties.aircraftSizes.includes(requirements.aircraftSize)) return false;
     return true;
@@ -163,16 +189,10 @@ export class GateSystem {
     const aircraftScore = this.#aircraftScore(gate, flight);
     const terminalScore = req.terminalId && gate.terminalId === req.terminalId ? 1 : 0;
     const connectionScore = req.connectionTerminalId && gate.terminalId === req.connectionTerminalId ? 1 : 0;
-    const airlinePreferenceScore = Array.isArray(gate.airlinePreferences) && gate.airlinePreferences.includes(flight.airline) ? 1 : 0;
+    const airlinePreferenceScore = gate.airlinePreferences.includes(flight.airline) ? 1 : 0;
     const distanceScore = req.preferredLocation && gate.location ? this.#distanceScore(gate.location, req.preferredLocation) : 0;
     const congestionPenalty = gate.status === GATE_STATUSES.RESERVED ? 1 : 0;
-    const score =
-      aircraftScore * this.weights.aircraftCompatibility +
-      terminalScore * this.weights.terminalCompatibility +
-      connectionScore * this.weights.connection +
-      airlinePreferenceScore * this.weights.airlinePreference +
-      distanceScore * this.weights.distance -
-      congestionPenalty * this.weights.congestionPenalty;
+    const score = aircraftScore * this.weights.aircraftCompatibility + terminalScore * this.weights.terminalCompatibility + connectionScore * this.weights.connection + airlinePreferenceScore * this.weights.airlinePreference + distanceScore * this.weights.distance - congestionPenalty * this.weights.congestionPenalty;
     return { score, breakdown: { aircraftScore, terminalScore, connectionScore, airlinePreferenceScore, distanceScore, congestionPenalty, conflictPenalty: 0, start: new Date(start) } };
   }
 
@@ -184,8 +204,7 @@ export class GateSystem {
       if (supported.includes(required)) return 1;
       const max = Math.max(...supported.map((size) => AIRCRAFT_SIZE_ORDER[size] ?? 0));
       const need = AIRCRAFT_SIZE_ORDER[required] ?? 0;
-      if (max >= need) return 0.5;
-      return 0;
+      return max >= need ? 0.5 : 0;
     }
     return 0;
   }
