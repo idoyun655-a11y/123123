@@ -33,31 +33,29 @@ export class FlightSimulationSystem {
 
   #scheduleInitialLifecycle(flight) {
     if (flight.scheduledArrival) {
-      this.#scheduleAt(flight, flight.estimatedArrival ?? flight.scheduledArrival, 'flight.approach', ({ event }) => {
+      const approachHandler = ({ event }) => {
         const current = this.#requireFlight(event.payload.flightId);
         const expected = current.estimatedArrival ?? current.scheduledArrival;
-        if (!expected || this.#isStale(event.at, expected)) {
-          if (expected && expected.getTime() > event.at.getTime()) {
-            this.#scheduleAt(current, expected, 'flight.approach', arguments.callee);
-          }
+        if (!expected) return;
+        if (this.#isStale(event.at, expected)) {
+          if (expected.getTime() > event.at.getTime()) this.#scheduleAt(current, expected, 'flight.approach', approachHandler);
           return;
         }
         if (current.status === FLIGHT_STATUSES.SCHEDULED || current.status === FLIGHT_STATUSES.DELAYED) {
           current.transitionTo(FLIGHT_STATUSES.APPROACHING, { at: event.at, reason: 'estimated arrival reached' });
         }
-      });
-
+      };
+      this.#scheduleAt(flight, flight.estimatedArrival ?? flight.scheduledArrival, 'flight.approach', approachHandler);
       this.#scheduleLandingEvent(flight, flight.estimatedArrival ?? flight.scheduledArrival);
     }
 
     if (flight.scheduledDeparture) {
-      this.#scheduleAt(flight, flight.estimatedDeparture ?? flight.scheduledDeparture, 'flight.departure', ({ event }) => {
+      const departureHandler = ({ event }) => {
         const current = this.#requireFlight(event.payload.flightId);
         const expected = current.estimatedDeparture ?? current.scheduledDeparture;
-        if (!expected || this.#isStale(event.at, expected)) {
-          if (expected && expected.getTime() > event.at.getTime()) {
-            this.#scheduleAt(current, expected, 'flight.departure', arguments.callee);
-          }
+        if (!expected) return;
+        if (this.#isStale(event.at, expected)) {
+          if (expected.getTime() > event.at.getTime()) this.#scheduleAt(current, expected, 'flight.departure', departureHandler);
           return;
         }
         if ([FLIGHT_STATUSES.READY, FLIGHT_STATUSES.AT_GATE, FLIGHT_STATUSES.BOARDING, FLIGHT_STATUSES.DELAYED].includes(current.status)) {
@@ -70,7 +68,8 @@ export class FlightSimulationSystem {
             }
           });
         }
-      });
+      };
+      this.#scheduleAt(flight, flight.estimatedDeparture ?? flight.scheduledDeparture, 'flight.departure', departureHandler);
     }
   }
 
