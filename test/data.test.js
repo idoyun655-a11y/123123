@@ -26,5 +26,5 @@ test('officially published airport-wide totals are represented as REAL', () => {
 test('unverified component-level values are not misclassified as REAL', () => {
   const runway1 = INCHEON_AIRPORT_DATA.runways.find((x) => x.id === 'RWY-1');
   assert.equal(runway1.sourceType, SOURCE_TYPES.ESTIMATED);
-  assert.equal(INCHEON_AIRPORT_DATA.parkings.find((x) => x.id === 'T1_SHORT_TERM').sourceType, SOURCE_TYPES.ESTIMATED);
+  assert.equal(INCHEON_AIRPORT_DATA.terminals.find((x) => x.id === 'T2').capacity, null);
 });
