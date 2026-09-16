@@ -1,7 +1,12 @@
 export class StaffingSystem {
   #facilities = new Map();
   constructor({ employees, roles, queueEngine = null, config = {} } = {}) { this.employees = employees; this.roles = roles; this.queueEngine = queueEngine; this.config = config; }
-  registerFacility({ facilityId, requiredStaff = 0, minimumStaff = 0, targetStaff = requiredStaff, queueId = null, serviceType = null, allowedRoleIds = [], baseServerCount = null, operatingStatus = 'OPERATIONAL' } = {}) { if (!facilityId) throw new TypeError('facilityId is required.'); const record = { facilityId, requiredStaff: Math.max(0, Number(requiredStaff) || 0), minimumStaff: Math.max(0, Number(minimumStaff) || 0), targetStaff: Math.max(0, Number(targetStaff) || 0), queueId, serviceType, allowedRoleIds: [...allowedRoleIds], baseServerCount, operatingStatus }; this.#facilities.set(facilityId, record); this.#sync(facilityId); return record; }
+  registerFacility({ facilityId, requiredStaff = 0, minimumStaff = 0, targetStaff = requiredStaff, queueId = null, serviceType = null, allowedRoleIds = [], baseServerCount = null, operatingStatus = 'OPERATIONAL' } = {}) {
+    if (!facilityId) throw new TypeError('facilityId is required.');
+    if (queueId) for (const [id, existing] of this.#facilities) if (id !== facilityId && existing.queueId === queueId) this.#facilities.delete(id);
+    const record = { facilityId, requiredStaff: Math.max(0, Number(requiredStaff) || 0), minimumStaff: Math.max(0, Number(minimumStaff) || 0), targetStaff: Math.max(0, Number(targetStaff) || 0), queueId, serviceType, allowedRoleIds: [...allowedRoleIds], baseServerCount, operatingStatus };
+    this.#facilities.set(facilityId, record); this.#sync(facilityId); return record;
+  }
   getFacility(facilityId) { const f = this.#facilities.get(facilityId); return f ? this.getFacilityStatus(facilityId) : null; }
   listFacilities() { return [...this.#facilities.keys()].map((id) => this.getFacilityStatus(id)); }
   setRequiredStaff(facilityId, requiredStaff) { const f = this.#require(facilityId); f.requiredStaff = Math.max(0, Number(requiredStaff) || 0); this.#sync(facilityId); return this.getFacilityStatus(facilityId); }
