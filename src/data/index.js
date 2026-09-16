@@ -1,3 +1,13 @@
 export { SOURCE_TYPES, OPERATING_STATUSES, MAINTENANCE_STATUSES, AirportObject, Models } from './model.js';
 export { INCHEON_AIRPORT_DATA, flattenIncheonDataset } from './incheon.js';
 export { MAP_UNITS, INCHEON_SPATIAL_MAP, SPATIAL_SOURCE, getSpatialObjects } from './spatial.js';
+export { DATA_SOURCE_TYPES, DataRecord, createDataRecord, cloneDataRecord } from './provenance.js';
+export { DataRegistry, DEFAULT_DATA_VERSION, registryFromSnapshot, createRegistry } from './registry.js';
+export { validateDataRecord, validateRecords, validateSourceTypeUsage } from './validation.js';
+export { OFFICIAL_SOURCES, AIRPORT_MASTER_RECORDS, AIRPORT_MASTER, HISTORICAL_SNAPSHOTS } from './airportMaster.js';
+export { averagePerDay, averagePerHour, ratio, buildAirportCalibration, validateCapacityConsistency } from './calibration.js';
+export { CHECK_STATUS, runRealityCheck, detectImpossibleConfiguration, findDuplicates } from './realityCheck.js';
+export { SCENARIOS, ScenarioOverride, createScenario, DEFAULT_SCENARIO_OVERRIDES } from './scenario.js';
+export { DataImporter, JsonDataAdapter, CsvDataAdapter, ApiDataAdapter, normalizeImportedRecords } from './importers.js';
+export { createDefaultDataRegistry, getConfiguredValue, getPassengerConfig, getBaggageConfig, getGroundConfig, getEmployeeConfig, getFacilityConfig } from './runtime.js';
+export { TIME_SCALE, simulationMilliseconds, realMilliseconds, timeScaleTable, demandInvariantCheck } from './timeScale.js';
