@@ -7,8 +7,13 @@ export class BaggageHandlingSystem extends BaseBaggageHandlingSystem {
   constructor(...args) { super(...args); this.#stabilizeQueues(); }
   getQueue(queueId) { return this.queueEngine.getQueue(queueId); }
   onPassengerCheckInCompleted(passenger, at = this.simulation.getSnapshot().currentTime) {
-    const created = super.onPassengerCheckInCompleted(passenger, at);
-    return created.length ? created : super.generateForPassenger(passenger, { at, count: 1 });
+    const created = super.generateForPassenger(passenger, { at, count: 1 });
+    for (const baggage of created) {
+      baggage.transitionTo(BAGGAGE_STATUSES.BAGGAGE_DROP, { at, zone: `BAGGAGE_DROP_${passenger.terminalId ?? 'UNKNOWN'}` });
+      const result = this.queueEngine.enqueue('BAGGAGE_DROP_QUEUE', baggage, { at, priority: baggage.priority });
+      if (!result.accepted) baggage.markException(BAGGAGE_STATUSES.DELAYED, { at, reason: 'baggage drop queue capacity exceeded' });
+    }
+    return created;
   }
   attachEmployeeSystem(system) {
     const result = super.attachEmployeeSystem(system);
