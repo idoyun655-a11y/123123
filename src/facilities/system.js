@@ -1,16 +1,413 @@
 import { FACILITY_CONFIG, FACILITY_DATA_POLICY, FACILITY_SERVICE_ROLE } from './config.js';
 import { EQUIPMENT_STATUSES, EQUIPMENT_TYPES, FACILITY_STATUSES, Facility, Equipment, MaintenanceTask, MAINTENANCE_STATUS, MAINTENANCE_TYPES } from './model.js';
-const clamp=(n,min,max)=>Math.min(max,Math.max(min,Number(n)||0));const dateValue=(v)=>new Date(v??Date.now());
-export class FacilitySystem{constructor(simulation,{queueEngine=null,employeeSystem=null,baggageSystem=null,groundHandlingSystem=null,gateSystem=null,runwaySystem=null,config=FACILITY_CONFIG,random=Math.random}={}){if(!simulation||typeof simulation.schedule!=='function')throw new TypeError('SimulationCore-compatible instance is required.');Object.assign(this,{simulation,queueEngine,employeeSystem,baggageSystem,groundHandlingSystem,gateSystem,runwaySystem,config,random});this.facilities=new Map();this.equipment=new Map();this.maintenance=new Map();this.queueBindings=new Map();this.flightImpactLog=[];this.#seq=0;}#seq;
-attachQueueEngine(q){this.queueEngine=q;this.syncAllQueueCapacities();return q;}attachEmployeeSystem(s){this.employeeSystem=s;this.syncAllQueueCapacities();return s;}attachBaggageSystem(s){this.baggageSystem=s;return s;}attachGroundHandlingSystem(s){this.groundHandlingSystem=s;return s;}attachGateSystem(s){this.gateSystem=s;return s;}attachRunwaySystem(s){this.runwaySystem=s;return s;}
-addFacility(input){const f=input instanceof Facility?input:new Facility(input);if(this.facilities.has(f.facilityId))throw new Error(`Facility already exists: ${f.facilityId}`);this.facilities.set(f.facilityId,f);this.#recalculateFacility(f.facilityId);return f;}addFacilities(list=[]){return list.map(x=>this.addFacility(x));}getFacility(id){return this.facilities.get(id)??null;}listFacilities(){return[...this.facilities.values()];}
-addEquipment(input){const e=input instanceof Equipment?input:new Equipment(input);if(this.equipment.has(e.equipmentId))throw new Error(`Equipment already exists: ${e.equipmentId}`);const f=this.facilities.get(e.facilityId);if(!f)throw new Error(`Unknown facility: ${e.facilityId}`);const d=this.config.equipmentDefaults[e.equipmentType]??this.config.equipmentDefaults.default;if(input?.reliability==null)e.reliability=d.reliability;if(input?.capacity==null)e.capacity=d.capacity;e.efficiency=input?.efficiency==null?this.efficiencyForHealth(e.health):e.efficiency;e.maintenanceIntervalHours=input?.maintenanceIntervalHours??d.maintenanceIntervalHours??this.config.maintenance.defaultIntervalHours;e.maintenanceIntervalDays=input?.maintenanceIntervalDays??null;this.equipment.set(e.equipmentId,e);f.addEquipment(e.equipmentId);this.#updateFailureProbability(e);if(this.queueBindings.size||this.gateSystem||this.runwaySystem||this.baggageSystem||this.groundHandlingSystem)this.#recalculateFacility(e.facilityId);else f.availableCapacity=Math.min(f.maxCapacity,Math.max(0,f.availableCapacity)+(e.isAvailable()?e.capacity*e.efficiency:0));if(this.queueBindings.size||this.gateSystem||this.runwaySystem||this.baggageSystem||this.groundHandlingSystem)this.#syncEquipmentImpact(e);return e;}
-addEquipments(list=[]){for(const x of list)this.addEquipment(x);for(const id of new Set(list.map(x=>x.facilityId)))if(id&&this.facilities.has(id))this.#recalculateFacility(id);return list.map(x=>this.getEquipment(x.equipmentId));}getEquipment(id){return this.equipment.get(id)??null;}listEquipment(){return[...this.equipment.values()];}getEquipmentForFacility(id){const f=this.getFacility(id);return f?f.equipmentIds.map(x=>this.getEquipment(x)).filter(Boolean):[];}
-bindQueue({queueId,facilityId,equipmentTypes=[],baseServerCount=null,serviceRateMultiplierFloor=.1}={}){if(!queueId||!facilityId)throw new TypeError('queueId and facilityId are required.');if(!this.facilities.has(facilityId))throw new Error(`Unknown facility: ${facilityId}`);this.queueBindings.set(queueId,{queueId,facilityId,equipmentTypes:[...equipmentTypes],baseServerCount,serviceRateMultiplierFloor});return this.syncQueueCapacity(queueId);}bindStandardQueues(){const q=this.config.queueBindings;const b=[[q.CHECK_IN,'CHECK_IN_ZONE',[EQUIPMENT_TYPES.CHECK_IN_COUNTER]],[q.SECURITY,'SECURITY_ZONE',[EQUIPMENT_TYPES.SECURITY_LANE,EQUIPMENT_TYPES.XRAY_MACHINE]],[q.DEPARTURE_IMMIGRATION,'DEPARTURE_IMMIGRATION_ZONE',[EQUIPMENT_TYPES.IT_SYSTEM]],[q.ARRIVAL_IMMIGRATION,'ARRIVAL_IMMIGRATION_ZONE',[EQUIPMENT_TYPES.IT_SYSTEM]],[q.BAGGAGE_DROP,'BAGGAGE_FACILITY',[EQUIPMENT_TYPES.CONVEYOR]],[q.BAGGAGE_SCREENING,'BAGGAGE_FACILITY',[EQUIPMENT_TYPES.XRAY_MACHINE]],[q.BAGGAGE_SORTING,'BAGGAGE_FACILITY',[EQUIPMENT_TYPES.BAGGAGE_SORTER]],[q.BAGGAGE_TRANSFER_SORTING,'BAGGAGE_FACILITY',[EQUIPMENT_TYPES.BAGGAGE_SORTER]],[q.BAGGAGE_LOADING,'BAGGAGE_FACILITY',[EQUIPMENT_TYPES.BAGGAGE_CART,EQUIPMENT_TYPES.CONVEYOR]],[q.BAGGAGE_UNLOAD,'BAGGAGE_FACILITY',[EQUIPMENT_TYPES.BAGGAGE_CART,EQUIPMENT_TYPES.CONVEYOR]]];for(const [id,f,t] of b)if(this.facilities.has(f)&&this.queueEngine?.getQueue(id))this.bindQueue({queueId:id,facilityId:f,equipmentTypes:t});}syncAllQueueCapacities(){for(const id of this.queueBindings.keys())this.syncQueueCapacity(id);}syncQueueCapacity(id){const b=this.queueBindings.get(id),q=this.queueEngine?.getQueue(id);if(!b||!q)return null;const f=this.getFacility(b.facilityId),es=this.getEquipmentForFacility(b.facilityId).filter(e=>!b.equipmentTypes.length||b.equipmentTypes.includes(e.equipmentType));if(!f)return null;const equipCap=es.length?es.filter(e=>e.isAvailable()).reduce((s,e)=>s+e.capacity,0):q.configuredServerCount,base=b.baseServerCount??q.configuredServerCount,of=this.getFacilityOperationalFactor(f),ee=es.length?weightedEfficiency(es.filter(e=>e.isAvailable())):1,staff=this.#staffCapacity(f.facilityId,base),effective=Math.max(0,Math.floor(Math.min(base,equipCap,staff)*of));return this.queueEngine.updateServiceCapacity(id,{serverCount:effective,serviceRateMultiplier:Math.max(b.serviceRateMultiplierFloor,of*ee*this.#staffingFactor(staff,base))});}
-calculateFacilityCapacity(id){const f=this.#requireFacility(id),es=this.getEquipmentForFacility(id),av=es.filter(e=>e.isAvailable()),ea=es.length?av.reduce((s,e)=>s+e.capacity,0)/Math.max(f.maxCapacity,1),ee=es.length?weightedEfficiency(av):1,sf=this.#staffingFactor(this.#staffCapacity(id,f.maxCapacity),f.maxCapacity),of=this.getFacilityOperationalFactor(f);return{baseCapacity:f.maxCapacity,equipmentAvailability:Math.min(1,ea),equipmentEfficiency:ee,staffingFactor:sf,operationalFactor:of,effectiveCapacity:Math.max(0,Math.floor(f.maxCapacity*Math.min(1,ea)*ee*sf*of))};}getFacilityOperationalFactor(f){if(f.operatingStatus===FACILITY_STATUSES.CLOSED||f.maintenanceStatus==='IN_PROGRESS')return 0;if(f.health>=80)return 1;if(f.health>=50)return .85;if(f.health>=20)return .6;return .15;}
-recordUtilization(id,u){const f=this.#requireFacility(id);f.utilization=clamp(u/Math.max(1,f.availableCapacity),0,1);for(const e of this.getEquipmentForFacility(id))e.utilization=f.utilization;return f.utilization;}updateEquipmentHealth(id,h,{at=this.simulation.getSnapshot().currentTime,hours=0}={}){const e=this.#requireEquipment(id);if(hours>0)e.operatingHours+=hours;e.setHealth(h);e.efficiency=this.efficiencyForHealth(e.health);this.#updateFailureProbability(e);const was=e.status;this.#updateEquipmentStatusFromHealth(e);this.#recalculateFacility(e.facilityId);this.#syncEquipmentImpact(e);if(was!==EQUIPMENT_STATUSES.FAILED&&e.status===EQUIPMENT_STATUSES.FAILED)this.createCorrectiveMaintenance(id,{at});return e;}advanceOperatingHours(hours,{at=this.simulation.getSnapshot().currentTime}={}){if(!Number.isFinite(hours)||hours<0)throw new RangeError('hours must be non-negative.');for(const e of this.equipment.values())if([EQUIPMENT_STATUSES.OPERATIONAL,EQUIPMENT_STATUSES.DEGRADED].includes(e.status)){e.operatingHours+=hours;this.updateEquipmentHealth(e.equipmentId,e.health-hours*this.config.health.decayPerOperatingHour*(1+e.utilization*this.config.health.utilizationDecayMultiplier),{at});if(this.isMaintenanceDue(e,at))e.maintenanceDue=true;}this.evaluateFailures({at});}efficiencyForHealth(h){return this.config.health.efficiencyByHealth.find(r=>h>=r.minHealth)?.efficiency??.15;}isMaintenanceDue(e,at=this.simulation.getSnapshot().currentTime){if(e.nextMaintenance&&dateValue(at)>=e.nextMaintenance)return true;if(e.maintenanceIntervalHours&&e.operatingHours>=e.maintenanceIntervalHours)return true;if(e.maintenanceIntervalDays&&e.lastMaintenance)return dateValue(at).getTime()-e.lastMaintenance.getTime()>=e.maintenanceIntervalDays*86400000;return e.maintenanceDue;}
-evaluateFailures({at=this.simulation.getSnapshot().currentTime}={}){const out=[];for(const e of this.equipment.values())if([EQUIPMENT_STATUSES.OPERATIONAL,EQUIPMENT_STATUSES.DEGRADED].includes(e.status)){this.#updateFailureProbability(e);if(this.random()<e.failureProbability)out.push(this.failEquipment(e.equipmentId,{at,reason:'probabilistic reliability model'}));}return out;}failEquipment(id,{at=this.simulation.getSnapshot().currentTime,reason='failure'}={}){const e=this.#requireEquipment(id);if(e.status===EQUIPMENT_STATUSES.FAILED)return e;e.status=EQUIPMENT_STATUSES.FAILED;e.failureCount+=1;e.failureReason=reason;e.failureStartedAt=dateValue(at);this.#recalculateFacility(e.facilityId);this.#syncEquipmentImpact(e);this.createCorrectiveMaintenance(id,{at});return e;}
-createMaintenance(input){const e=this.#requireEquipment(input.equipmentId),f=this.getFacility(input.facilityId??e.facilityId),t=input instanceof MaintenanceTask?input:new MaintenanceTask({...input,facilityId:input.facilityId??e.facilityId,status:input.status??MAINTENANCE_STATUS.PENDING});if(this.maintenance.has(t.maintenanceId))throw new Error(`Maintenance task already exists: ${t.maintenanceId}`);this.maintenance.set(t.maintenanceId,t);if(f)f.maintenancePriority=Math.max(f.maintenancePriority,t.priority);if(t.scheduledAt)this.simulation.schedule({at:t.scheduledAt,type:'maintenance.scheduled',payload:{maintenanceId:t.maintenanceId},handler:({event})=>this.startMaintenance(event.payload.maintenanceId,event.at)});return t;}createPreventiveMaintenance(id,{at=this.simulation.getSnapshot().currentTime,priority=0}={}){const e=this.#requireEquipment(id);return this.createMaintenance({maintenanceId:`M-${++this.#seq}`,equipmentId:id,facilityId:e.facilityId,maintenanceType:MAINTENANCE_TYPES.PREVENTIVE,priority,requiredStaff:this.config.maintenance.defaultRequiredStaff,duration:this.config.maintenance.preventiveMinutes,scheduledAt:dateValue(at),status:MAINTENANCE_STATUS.SCHEDULED});}createCorrectiveMaintenance(id,{at=this.simulation.getSnapshot().currentTime}={}){const e=this.#requireEquipment(id);return this.createMaintenance({maintenanceId:`M-${++this.#seq}`,equipmentId:id,facilityId:e.facilityId,maintenanceType:MAINTENANCE_TYPES.CORRECTIVE,priority:this.calculateMaintenancePriority(id),requiredStaff:this.config.maintenance.defaultRequiredStaff,duration:this.config.maintenance.correctiveMinutes,scheduledAt:dateValue(at),status:MAINTENANCE_STATUS.PENDING});}assignMaintenance(id,ids=[]){const t=this.#requireMaintenance(id);t.assignEmployees(ids);if([MAINTENANCE_STATUS.PENDING,MAINTENANCE_STATUS.DELAYED].includes(t.status))this.startMaintenance(id,this.simulation.getSnapshot().currentTime);return t;}autoAssignMaintenance(id){const t=this.#requireMaintenance(id);if(!this.employeeSystem?.listEmployees)return t;const ids=this.employeeSystem.listEmployees().filter(e=>e.isOperational()&&FACILITY_SERVICE_ROLE.maintenance.has(e.roleId)&&(!e.currentFacilityId||e.currentFacilityId===t.facilityId)).sort((a,b)=>(this.employeeSystem.effectiveProductivity(b.employeeId)??0)-(this.employeeSystem.effectiveProductivity(a.employeeId)??0)).slice(0,t.requiredStaff).map(e=>e.employeeId);if(ids.length)this.assignMaintenance(id,ids);return t;}startMaintenance(id,at=this.simulation.getSnapshot().currentTime){const t=this.#requireMaintenance(id);if([MAINTENANCE_STATUS.COMPLETED,MAINTENANCE_STATUS.CANCELLED,MAINTENANCE_STATUS.IN_PROGRESS].includes(t.status))return t;const e=this.#requireEquipment(t.equipmentId);if(!t.assignedEmployees.length&&this.employeeSystem)return this.autoAssignMaintenance(id);const f=this.#maintenanceStaffingFactor(t);if(f<=0){t.status=MAINTENANCE_STATUS.DELAYED;this.#scheduleMaintenanceRetry(t,at);return t;}e.status=EQUIPMENT_STATUSES.MAINTENANCE;t.status=f<1?MAINTENANCE_STATUS.DELAYED:MAINTENANCE_STATUS.IN_PROGRESS;t.startedAt=dateValue(at);this.simulation.schedule({at:new Date(dateValue(at).getTime()+t.duration/Math.max(f,.01)*60000),type:'maintenance.completed',payload:{maintenanceId:id},handler:({event})=>this.completeMaintenance(id,event.at)});this.#recalculateFacility(e.facilityId);this.#syncEquipmentImpact(e);return t;}completeMaintenance(id,at=this.simulation.getSnapshot().currentTime){const t=this.#requireMaintenance(id),e=this.#requireEquipment(t.equipmentId),elapsed=t.startedAt?Math.max(0,(dateValue(at)-t.startedAt)/60000):0;t.completedAt=dateValue(at);t.status=MAINTENANCE_STATUS.COMPLETED;e.lastMaintenance=dateValue(at);e.maintenanceDue=false;e.operatingHours=Math.max(0,e.operatingHours*.25);e.setHealth(100);e.efficiency=1;e.status=EQUIPMENT_STATUSES.OPERATIONAL;e.totalMaintenanceMinutes+=elapsed;if(e.failureStartedAt)e.downtimeMinutes+=Math.max(0,(dateValue(at)-e.failureStartedAt)/60000);e.failureStartedAt=null;e.nextMaintenance=new Date(dateValue(at).getTime()+(e.maintenanceIntervalHours??this.config.maintenance.defaultIntervalHours)*3600000);this.#recalculateFacility(e.facilityId);this.#syncEquipmentImpact(e);this.#resumeBoundServices(e.facilityId);return t;}calculateMaintenancePriority(id){const e=this.#requireEquipment(id),f=this.#requireFacility(e.facilityId),w=this.config.maintenance.priorityWeights,safety=[EQUIPMENT_TYPES.SECURITY_LANE,EQUIPMENT_TYPES.XRAY_MACHINE,EQUIPMENT_TYPES.BOARDING_BRIDGE].includes(e.equipmentType)?w.safetyWeight:0,op=e.capacity*w.operationalImpact,util=e.utilization*w.utilizationWeight,sev=(1-e.health/100)*w.failureSeverity,pass=[EQUIPMENT_TYPES.CHECK_IN_COUNTER,EQUIPMENT_TYPES.SECURITY_LANE,EQUIPMENT_TYPES.ESCALATOR,EQUIPMENT_TYPES.ELEVATOR].includes(e.equipmentType)?w.passengerImpact:0,flight=[EQUIPMENT_TYPES.BOARDING_BRIDGE,EQUIPMENT_TYPES.BAGGAGE_SORTER,EQUIPMENT_TYPES.TOW_TRACTOR,EQUIPMENT_TYPES.FUELING_EQUIPMENT].includes(e.equipmentType)?w.flightImpact:0;return Math.round((safety+op+util+sev+pass+flight+f.maintenancePriority)*100)/100;}getGroundEquipmentFactor(id,taskType=null){const all=this.getEquipmentForFacility(id).filter(e=>!taskType||groundTypesForTask(taskType).includes(e.equipmentType));if(!all.length)return 1;const total=all.reduce((s,e)=>s+e.capacity,0),available=all.filter(e=>e.isAvailable()).reduce((s,e)=>s+e.capacity*e.efficiency,0);return Math.min(1,available/Math.max(1,total));}
-statistics(){const fs=this.listFacilities(),es=this.listEquipment(),ms=[...this.maintenance.values()],avg=(a,fn)=>a.length?a.reduce((s,x)=>s+fn(x),0)/a.length:0;return{facilities:{totalFacilities:fs.length,operationalFacilities:fs.filter(x=>x.operatingStatus===FACILITY_STATUSES.OPERATIONAL).length,degradedFacilities:fs.filter(x=>[FACILITY_STATUSES.DEGRADED,FACILITY_STATUSES.PARTIALLY_OPERATIONAL].includes(x.operatingStatus)).length,maintenanceFacilities:fs.filter(x=>x.operatingStatus===FACILITY_STATUSES.MAINTENANCE).length,failedFacilities:fs.filter(x=>x.operatingStatus===FACILITY_STATUSES.FAILED).length,closedFacilities:fs.filter(x=>x.operatingStatus===FACILITY_STATUSES.CLOSED).length},equipment:{totalEquipment:es.length,operationalEquipment:es.filter(x=>x.status===EQUIPMENT_STATUSES.OPERATIONAL).length,degradedEquipment:es.filter(x=>x.status===EQUIPMENT_STATUSES.DEGRADED).length,maintenanceEquipment:es.filter(x=>x.status===EQUIPMENT_STATUSES.MAINTENANCE).length,failedEquipment:es.filter(x=>x.status===EQUIPMENT_STATUSES.FAILED).length,offlineEquipment:es.filter(x=>x.status===EQUIPMENT_STATUSES.OFFLINE).length,averageHealth:avg(es,x=>x.health),averageUtilization:avg(es,x=>x.utilization),failureCount:es.reduce((s,x)=>s+x.failureCount,0),maintenanceCount:ms.length,preventiveMaintenanceCount:ms.filter(x=>x.maintenanceType===MAINTENANCE_TYPES.PREVENTIVE).length,correctiveMaintenanceCount:ms.filter(x=>x.maintenanceType===MAINTENANCE_TYPES.CORRECTIVE).length,averageRepairTime:avg(es.filter(x=>x.failureCount&&x.downtimeMinutes),x=>x.downtimeMinutes),averageMaintenanceTime:avg(es.filter(x=>x.totalMaintenanceMinutes),x=>x.totalMaintenanceMinutes)},maintenance:{pendingMaintenance:ms.filter(x=>x.status===MAINTENANCE_STATUS.PENDING).length,activeMaintenance:ms.filter(x=>[MAINTENANCE_STATUS.IN_PROGRESS,MAINTENANCE_STATUS.DELAYED].includes(x.status)).length,completedMaintenance:ms.filter(x=>x.status===MAINTENANCE_STATUS.COMPLETED).length,delayedMaintenance:ms.filter(x=>x.status===MAINTENANCE_STATUS.DELAYED).length,maintenanceBacklog:ms.filter(x=>[MAINTENANCE_STATUS.PENDING,MAINTENANCE_STATUS.DELAYED].includes(x.status)).length,averageMaintenanceDuration:avg(ms.filter(x=>x.startedAt&&x.completedAt),x=>(x.completedAt-x.startedAt)/60000),equipmentDowntime:es.reduce((s,x)=>s+x.downtimeMinutes,0),facilityDowntime:fs.reduce((s,f)=>s+this.getEquipmentForFacility(f.facilityId).reduce((s2,e)=>s2+e.downtimeMinutes,0),0)},dataPolicy:FACILITY_DATA_POLICY};}getFacilityStatus(id){const f=this.#requireFacility(id),c=this.calculateFacilityCapacity(id);return{facilityId:id,health:f.health,utilization:f.utilization,availableCapacity:f.availableCapacity,effectiveCapacity:c.effectiveCapacity,operatingStatus:f.operatingStatus,maintenanceStatus:f.maintenanceStatus};}getFailedEquipment(){return this.listEquipment().filter(e=>e.status===EQUIPMENT_STATUSES.FAILED);}getMaintenanceQueue(){return[...this.maintenance.values()].filter(x=>[MAINTENANCE_STATUS.PENDING,MAINTENANCE_STATUS.DELAYED,MAINTENANCE_STATUS.IN_PROGRESS].includes(x.status)).sort((a,b)=>b.priority-a.priority);}
-#staffCapacity(id,base){if(!this.employeeSystem?.listEmployees)return base;const es=this.employeeSystem.listEmployees().filter(e=>e.isOperational()&&e.currentFacilityId===id);return es.length?es.reduce((s,e)=>s+(this.employeeSystem.effectiveProductivity(e.employeeId)??0),0):0;}#staffingFactor(s,b){return b>0?clamp(s/b,0,1):1;}#maintenanceStaffingFactor(t){if(!this.employeeSystem)return 1;return t.requiredStaff?clamp(t.assignedEmployees.reduce((s,id)=>s+(this.employeeSystem.effectiveProductivity(id)??0),0)/t.requiredStaff,0,2):1;}#scheduleMaintenanceRetry(t,at){this.simulation.schedule({at:new Date(dateValue(at).getTime()+60000),type:'maintenance.retry',payload:{maintenanceId:t.maintenanceId},handler:({event})=>{this.autoAssignMaintenance(t.maintenanceId);this.startMaintenance(t.maintenanceId,event.at);}});}#updateFailureProbability(e){const r=this.config.reliability,age=1+Math.max(0,e.age)*r.ageFactorPerYear,util=1+e.utilization*r.utilizationFactor,cond=1+(1-e.condition/100)*r.conditionFactor,maint=e.maintenanceDue?r.maintenanceFactor:1;e.failureProbability=clamp(r.baseFailureRatePerHour*age*util*cond*maint/Math.max(.1,e.reliability),0,1);}#updateEquipmentStatusFromHealth(e){if([EQUIPMENT_STATUSES.MAINTENANCE,EQUIPMENT_STATUSES.OFFLINE,EQUIPMENT_STATUSES.RETIRED].includes(e.status))return;if(e.health<this.config.health.failedThreshold)e.status=EQUIPMENT_STATUSES.FAILED;else if(e.health<this.config.health.degradedThreshold)e.status=EQUIPMENT_STATUSES.DEGRADED;else e.status=EQUIPMENT_STATUSES.OPERATIONAL;}#recalculateFacility(id){const f=this.#requireFacility(id),c=this.calculateFacilityCapacity(id);f.availableCapacity=c.effectiveCapacity;const failed=this.getEquipmentForFacility(id).filter(e=>e.status===EQUIPMENT_STATUSES.FAILED).length;if(f.operatingStatus===FACILITY_STATUSES.CLOSED)return f;if(f.maintenanceStatus==='IN_PROGRESS')f.operatingStatus=FACILITY_STATUSES.MAINTENANCE;else if(f.health<this.config.health.failedThreshold||(this.getEquipmentForFacility(id).length&&c.effectiveCapacity===0))f.operatingStatus=FACILITY_STATUSES.FAILED;else if(failed||f.health<this.config.health.degradedThreshold||c.effectiveCapacity<f.maxCapacity)f.operatingStatus=c.effectiveCapacity<f.maxCapacity*.5?FACILITY_STATUSES.PARTIALLY_OPERATIONAL:FACILITY_STATUSES.DEGRADED;else f.operatingStatus=FACILITY_STATUSES.OPERATIONAL;return f;}#syncEquipmentImpact(e){const f=this.#recalculateFacility(e.facilityId);for(const id of this.queueBindings.keys())this.syncQueueCapacity(id);if(e.equipmentType===EQUIPMENT_TYPES.BOARDING_BRIDGE)this.#syncGate(e);if(this.runwaySystem&&(e.equipmentType===EQUIPMENT_TYPES.IT_SYSTEM||e.equipmentType===EQUIPMENT_TYPES.POWER_UNIT))this.#syncRunway(e);this.baggageSystem?.syncFacilityCapacity?.(e.facilityId,f.availableCapacity);this.groundHandlingSystem?.syncFacilityCapacity?.(e.facilityId);return f;}#syncGate(e){const id=e.facilityId.startsWith('GATE_')?e.facilityId.slice(5):e.facilityId,g=this.gateSystem?.getGate?.(id);if(!g)return;if([EQUIPMENT_STATUSES.FAILED,EQUIPMENT_STATUSES.MAINTENANCE].includes(e.status))g.status='BLOCKED';else if(g.status==='BLOCKED')g.status='AVAILABLE';}#syncRunway(e){const id=e.facilityId.startsWith('RUNWAY_')?e.facilityId.slice(7):e.facilityId,r=this.runwaySystem?.getRunway?.(id);if(!r)return;if([EQUIPMENT_STATUSES.FAILED,EQUIPMENT_STATUSES.MAINTENANCE].includes(e.status)){r.status='MAINTENANCE';r.maintenanceStatus='IN_PROGRESS';}else if(r.status==='MAINTENANCE'){r.status='AVAILABLE';r.maintenanceStatus='NORMAL';}}#resumeBoundServices(id){for(const [q,b] of this.queueBindings)if(b.facilityId===id)this.syncQueueCapacity(q);}#requireFacility(id){const f=this.facilities.get(id);if(!f)throw new Error(`Unknown facility: ${id}`);return f;}#requireEquipment(id){const e=this.equipment.get(id);if(!e)throw new Error(`Unknown equipment: ${id}`);return e;}#requireMaintenance(id){const t=this.maintenance.get(id);if(!t)throw new Error(`Unknown maintenance: ${id}`);return t;}}
-function weightedEfficiency(items){if(!items.length)return 0;const c=items.reduce((s,e)=>s+e.capacity,0);return c?items.reduce((s,e)=>s+e.capacity*e.efficiency,0)/c:0;}function groundTypesForTask(t){return({BAGGAGE_UNLOAD:[EQUIPMENT_TYPES.BAGGAGE_CART,EQUIPMENT_TYPES.CONVEYOR,EQUIPMENT_TYPES.GROUND_SUPPORT_EQUIPMENT],BAGGAGE_LOAD:[EQUIPMENT_TYPES.BAGGAGE_CART,EQUIPMENT_TYPES.CONVEYOR,EQUIPMENT_TYPES.GROUND_SUPPORT_EQUIPMENT],CATERING:[EQUIPMENT_TYPES.CATERING_VEHICLE,EQUIPMENT_TYPES.GROUND_SUPPORT_EQUIPMENT],REFUELING:[EQUIPMENT_TYPES.FUELING_EQUIPMENT,EQUIPMENT_TYPES.GROUND_SUPPORT_EQUIPMENT],PUSHBACK:[EQUIPMENT_TYPES.TOW_TRACTOR,EQUIPMENT_TYPES.POWER_UNIT],BOARDING_SUPPORT:[EQUIPMENT_TYPES.BOARDING_BRIDGE,EQUIPMENT_TYPES.BUS],PASSENGER_DISEMBARK:[EQUIPMENT_TYPES.BOARDING_BRIDGE,EQUIPMENT_TYPES.BUS]})[t]??Object.values(EQUIPMENT_TYPES);}
+
+const clamp = (value, min, max) => Math.min(max, Math.max(min, Number(value) || 0));
+const asDate = (value, fallback = Date.now()) => {
+  const date = new Date(value ?? fallback);
+  if (Number.isNaN(date.getTime())) throw new TypeError(`Invalid date: ${value}`);
+  return date;
+};
+
+export class FacilitySystem {
+  constructor(simulation, { queueEngine = null, employeeSystem = null, baggageSystem = null, groundHandlingSystem = null, gateSystem = null, runwaySystem = null, config = FACILITY_CONFIG, random = Math.random } = {}) {
+    if (!simulation || typeof simulation.schedule !== 'function') throw new TypeError('SimulationCore-compatible instance is required.');
+    Object.assign(this, { simulation, queueEngine, employeeSystem, baggageSystem, groundHandlingSystem, gateSystem, runwaySystem, config, random });
+    this.facilities = new Map();
+    this.equipment = new Map();
+    this.maintenance = new Map();
+    this.queueBindings = new Map();
+    this.flightImpactLog = [];
+    this.sequence = 0;
+  }
+
+  attachQueueEngine(engine) { this.queueEngine = engine; this.syncAllQueueCapacities(); return engine; }
+  attachEmployeeSystem(system) { this.employeeSystem = system; this.syncAllQueueCapacities(); return system; }
+  attachBaggageSystem(system) { this.baggageSystem = system; system?.attachFacilitySystem?.(this); return system; }
+  attachGroundHandlingSystem(system) { this.groundHandlingSystem = system; system?.attachFacilitySystem?.(this); return system; }
+  attachGateSystem(system) { this.gateSystem = system; return system; }
+  attachRunwaySystem(system) { this.runwaySystem = system; return system; }
+
+  addFacility(input) {
+    const facility = input instanceof Facility ? input : new Facility(input);
+    if (this.facilities.has(facility.facilityId)) throw new Error(`Facility already exists: ${facility.facilityId}`);
+    this.facilities.set(facility.facilityId, facility);
+    this._recalculateFacility(facility.facilityId);
+    return facility;
+  }
+  addFacilities(items = []) { return items.map((item) => this.addFacility(item)); }
+  getFacility(id) { return this.facilities.get(id) ?? null; }
+  listFacilities() { return [...this.facilities.values()]; }
+
+  addEquipment(input) {
+    const equipment = input instanceof Equipment ? input : new Equipment(input);
+    if (this.equipment.has(equipment.equipmentId)) throw new Error(`Equipment already exists: ${equipment.equipmentId}`);
+    const facility = this.facilities.get(equipment.facilityId);
+    if (!facility) throw new Error(`Unknown facility: ${equipment.facilityId}`);
+    const defaults = this.config.equipmentDefaults[equipment.equipmentType] ?? this.config.equipmentDefaults.default;
+    if (input?.reliability == null) equipment.reliability = defaults.reliability;
+    if (input?.capacity == null) equipment.capacity = defaults.capacity;
+    equipment.efficiency = input?.efficiency == null ? this.efficiencyForHealth(equipment.health) : equipment.efficiency;
+    equipment.maintenanceIntervalHours = input?.maintenanceIntervalHours ?? defaults.maintenanceIntervalHours ?? this.config.maintenance.defaultIntervalHours;
+    equipment.maintenanceIntervalDays = input?.maintenanceIntervalDays ?? null;
+    this.equipment.set(equipment.equipmentId, equipment);
+    facility.equipmentIds.push(equipment.equipmentId);
+    equipment.failureProbability = this._calculateFailureProbability(equipment);
+    this._recalculateFacility(facility.facilityId);
+    this._syncEquipmentImpact(equipment);
+    return equipment;
+  }
+  addEquipments(items = []) { return items.map((item) => this.addEquipment(item)); }
+  getEquipment(id) { return this.equipment.get(id) ?? null; }
+  listEquipment() { return [...this.equipment.values()]; }
+  getEquipmentForFacility(id) { const facility = this.getFacility(id); return facility ? facility.equipmentIds.map((equipmentId) => this.getEquipment(equipmentId)).filter(Boolean) : []; }
+
+  bindQueue({ queueId, facilityId, equipmentTypes = [], baseServerCount = null, serviceRateMultiplierFloor = 0.1 } = {}) {
+    if (!queueId || !facilityId) throw new TypeError('queueId and facilityId are required.');
+    if (!this.facilities.has(facilityId)) throw new Error(`Unknown facility: ${facilityId}`);
+    this.queueBindings.set(queueId, { queueId, facilityId, equipmentTypes: [...equipmentTypes], baseServerCount, serviceRateMultiplierFloor });
+    return this.syncQueueCapacity(queueId);
+  }
+
+  bindStandardQueues() {
+    const q = this.config.queueBindings;
+    const bindings = [
+      [q.CHECK_IN, 'CHECK_IN_ZONE', [EQUIPMENT_TYPES.CHECK_IN_COUNTER]],
+      [q.SECURITY, 'SECURITY_ZONE', [EQUIPMENT_TYPES.SECURITY_LANE, EQUIPMENT_TYPES.XRAY_MACHINE]],
+      [q.DEPARTURE_IMMIGRATION, 'DEPARTURE_IMMIGRATION_ZONE', [EQUIPMENT_TYPES.IT_SYSTEM]],
+      [q.ARRIVAL_IMMIGRATION, 'ARRIVAL_IMMIGRATION_ZONE', [EQUIPMENT_TYPES.IT_SYSTEM]],
+      [q.BAGGAGE_DROP, 'BAGGAGE_FACILITY', [EQUIPMENT_TYPES.CONVEYOR]],
+      [q.BAGGAGE_SCREENING, 'BAGGAGE_FACILITY', [EQUIPMENT_TYPES.XRAY_MACHINE]],
+      [q.BAGGAGE_SORTING, 'BAGGAGE_FACILITY', [EQUIPMENT_TYPES.BAGGAGE_SORTER]],
+      [q.BAGGAGE_TRANSFER_SORTING, 'BAGGAGE_FACILITY', [EQUIPMENT_TYPES.BAGGAGE_SORTER]],
+      [q.BAGGAGE_LOADING, 'BAGGAGE_FACILITY', [EQUIPMENT_TYPES.BAGGAGE_CART, EQUIPMENT_TYPES.CONVEYOR]],
+      [q.BAGGAGE_UNLOAD, 'BAGGAGE_FACILITY', [EQUIPMENT_TYPES.BAGGAGE_CART, EQUIPMENT_TYPES.CONVEYOR]],
+    ];
+    for (const [queueId, facilityId, types] of bindings) if (this.facilities.has(facilityId) && this.queueEngine?.getQueue(queueId)) this.bindQueue({ queueId, facilityId, equipmentTypes: types });
+  }
+  syncAllQueueCapacities() { for (const queueId of this.queueBindings.keys()) this.syncQueueCapacity(queueId); }
+
+  syncQueueCapacity(queueId) {
+    const binding = this.queueBindings.get(queueId);
+    const queue = this.queueEngine?.getQueue(queueId);
+    if (!binding || !queue) return null;
+    const facility = this.getFacility(binding.facilityId);
+    if (!facility) return null;
+    const equipment = this.getEquipmentForFacility(binding.facilityId).filter((item) => !binding.equipmentTypes.length || binding.equipmentTypes.includes(item.equipmentType));
+    const equipmentCapacity = equipment.length ? equipment.filter((item) => item.isAvailable()).reduce((sum, item) => sum + item.capacity, 0) : queue.configuredServerCount;
+    const base = binding.baseServerCount ?? queue.configuredServerCount;
+    const staffCapacity = this._staffCapacity(facility.facilityId, base);
+    const operationalFactor = this.getFacilityOperationalFactor(facility);
+    const equipmentEfficiency = equipment.length ? this._weightedEfficiency(equipment.filter((item) => item.isAvailable())) : 1;
+    const effectiveServerCount = Math.max(0, Math.floor(Math.min(base, equipmentCapacity, staffCapacity) * operationalFactor));
+    const serviceRateMultiplier = Math.max(binding.serviceRateMultiplierFloor, operationalFactor * equipmentEfficiency * this._staffingFactor(staffCapacity, base));
+    return this.queueEngine.updateServiceCapacity(queueId, { serverCount: effectiveServerCount, serviceRateMultiplier });
+  }
+
+  calculateFacilityCapacity(facilityId) {
+    const facility = this._requireFacility(facilityId);
+    const equipment = this.getEquipmentForFacility(facilityId);
+    const available = equipment.filter((item) => item.isAvailable());
+    const equipmentAvailability = equipment.length ? available.reduce((sum, item) => sum + item.capacity, 0) / Math.max(facility.maxCapacity, 1) : 1;
+    const equipmentEfficiency = equipment.length ? this._weightedEfficiency(available) : 1;
+    const staffingFactor = this._staffingFactor(this._staffCapacity(facilityId, facility.maxCapacity), facility.maxCapacity);
+    const operationalFactor = this.getFacilityOperationalFactor(facility);
+    const effectiveCapacity = Math.max(0, Math.floor(facility.maxCapacity * Math.min(1, equipmentAvailability) * equipmentEfficiency * staffingFactor * operationalFactor));
+    return { baseCapacity: facility.maxCapacity, equipmentAvailability: Math.min(1, equipmentAvailability), equipmentEfficiency, staffingFactor, operationalFactor, effectiveCapacity };
+  }
+
+  getFacilityOperationalFactor(facility) {
+    if (!facility || [FACILITY_STATUSES.CLOSED, FACILITY_STATUSES.MAINTENANCE, FACILITY_STATUSES.FAILED].includes(facility.operatingStatus)) return 0;
+    if (facility.health >= this.config.health.degradedThreshold) return 1;
+    if (facility.health >= this.config.health.partiallyOperationalThreshold) return 0.85;
+    if (facility.health >= this.config.health.failedThreshold) return 0.6;
+    return 0.15;
+  }
+
+  recordUtilization(facilityId, actualUsage) {
+    const facility = this._requireFacility(facilityId);
+    facility.utilization = clamp(actualUsage / Math.max(1, facility.availableCapacity), 0, 1);
+    for (const equipment of this.getEquipmentForFacility(facilityId)) equipment.utilization = facility.utilization;
+    return facility.utilization;
+  }
+
+  updateEquipmentHealth(equipmentId, health, { at = this.simulation.getSnapshot().currentTime, hours = 0 } = {}) {
+    const equipment = this._requireEquipment(equipmentId);
+    if (hours > 0) equipment.operatingHours += hours;
+    const before = equipment.status;
+    equipment.setHealth(health);
+    equipment.efficiency = this.efficiencyForHealth(equipment.health);
+    equipment.failureProbability = this._calculateFailureProbability(equipment);
+    if (equipment.health <= 0) equipment.status = EQUIPMENT_STATUSES.FAILED;
+    else if (equipment.health < this.config.health.degradedThreshold && equipment.status === EQUIPMENT_STATUSES.OPERATIONAL) equipment.status = EQUIPMENT_STATUSES.DEGRADED;
+    else if (equipment.health >= this.config.health.degradedThreshold && equipment.status === EQUIPMENT_STATUSES.DEGRADED) equipment.status = EQUIPMENT_STATUSES.OPERATIONAL;
+    this._recalculateFacility(equipment.facilityId);
+    this._syncEquipmentImpact(equipment);
+    this.simulation.logger.info('EquipmentHealthChangedEvent', { equipmentId, health: equipment.health, at: asDate(at).toISOString() });
+    if (before !== EQUIPMENT_STATUSES.FAILED && equipment.status === EQUIPMENT_STATUSES.FAILED) this.createCorrectiveMaintenance(equipmentId, { at });
+    return equipment;
+  }
+
+  advanceOperatingHours(hours, { at = this.simulation.getSnapshot().currentTime } = {}) {
+    if (!Number.isFinite(hours) || hours < 0) throw new RangeError('hours must be non-negative.');
+    for (const equipment of this.equipment.values()) {
+      if (!equipment.isAvailable()) continue;
+      const decay = hours * this.config.health.decayPerOperatingHour * (1 + equipment.utilization * this.config.health.utilizationDecayMultiplier);
+      equipment.operatingHours += hours;
+      this.updateEquipmentHealth(equipment.equipmentId, equipment.health - decay, { at });
+      if (this.isMaintenanceDue(equipment, at)) equipment.maintenanceDue = true;
+    }
+    return this.evaluateFailures({ at });
+  }
+
+  efficiencyForHealth(health) { return this.config.health.efficiencyByHealth.find((row) => health >= row.minHealth)?.efficiency ?? 0.15; }
+  isMaintenanceDue(equipment, at = this.simulation.getSnapshot().currentTime) {
+    if (equipment.nextMaintenance && asDate(at) >= equipment.nextMaintenance) return true;
+    if (equipment.maintenanceIntervalHours && equipment.operatingHours >= equipment.maintenanceIntervalHours) return true;
+    if (equipment.maintenanceIntervalDays && equipment.lastMaintenance) return asDate(at).getTime() - equipment.lastMaintenance.getTime() >= equipment.maintenanceIntervalDays * 86400000;
+    return equipment.maintenanceDue;
+  }
+
+  evaluateFailures({ at = this.simulation.getSnapshot().currentTime } = {}) {
+    const failures = [];
+    for (const equipment of this.equipment.values()) {
+      if (!equipment.isAvailable()) continue;
+      equipment.failureProbability = this._calculateFailureProbability(equipment);
+      if (this.random() < equipment.failureProbability) failures.push(this.failEquipment(equipment.equipmentId, { at, reason: 'probabilistic reliability model' }));
+    }
+    return failures;
+  }
+
+  failEquipment(equipmentId, { at = this.simulation.getSnapshot().currentTime, reason = 'failure' } = {}) {
+    const equipment = this._requireEquipment(equipmentId);
+    if (equipment.status === EQUIPMENT_STATUSES.FAILED) return equipment;
+    equipment.status = EQUIPMENT_STATUSES.FAILED;
+    equipment.failureCount += 1;
+    equipment.failureReason = reason;
+    equipment.failureStartedAt = asDate(at);
+    this._recalculateFacility(equipment.facilityId);
+    this._syncEquipmentImpact(equipment);
+    const task = this.createCorrectiveMaintenance(equipmentId, { at });
+    this.simulation.logger.info('EquipmentFailureEvent', { equipmentId, facilityId: equipment.facilityId, maintenanceId: task.maintenanceId, at: equipment.failureStartedAt.toISOString() });
+    return equipment;
+  }
+
+  createMaintenance(input) {
+    const equipment = this._requireEquipment(input.equipmentId);
+    const task = input instanceof MaintenanceTask ? input : new MaintenanceTask({ ...input, facilityId: input.facilityId ?? equipment.facilityId, status: input.status ?? MAINTENANCE_STATUS.PENDING });
+    if (this.maintenance.has(task.maintenanceId)) throw new Error(`Maintenance task already exists: ${task.maintenanceId}`);
+    this.maintenance.set(task.maintenanceId, task);
+    const facility = this.getFacility(task.facilityId);
+    if (facility) facility.maintenancePriority = Math.max(facility.maintenancePriority, task.priority);
+    if (task.scheduledAt) this.simulation.schedule({ at: task.scheduledAt, type: 'maintenance.scheduled', payload: { maintenanceId: task.maintenanceId }, handler: ({ event }) => this.startMaintenance(task.maintenanceId, event.at) });
+    return task;
+  }
+
+  createPreventiveMaintenance(equipmentId, { at = this.simulation.getSnapshot().currentTime, priority = 0 } = {}) {
+    const equipment = this._requireEquipment(equipmentId);
+    return this.createMaintenance({ maintenanceId: `M-${++this.sequence}`, equipmentId, facilityId: equipment.facilityId, maintenanceType: MAINTENANCE_TYPES.PREVENTIVE, priority, requiredStaff: this.config.maintenance.defaultRequiredStaff, duration: this.config.maintenance.preventiveMinutes, scheduledAt: asDate(at), status: MAINTENANCE_STATUS.SCHEDULED });
+  }
+  createCorrectiveMaintenance(equipmentId, { at = this.simulation.getSnapshot().currentTime } = {}) {
+    const equipment = this._requireEquipment(equipmentId);
+    return this.createMaintenance({ maintenanceId: `M-${++this.sequence}`, equipmentId, facilityId: equipment.facilityId, maintenanceType: MAINTENANCE_TYPES.CORRECTIVE, priority: this.calculateMaintenancePriority(equipmentId), requiredStaff: this.config.maintenance.defaultRequiredStaff, duration: this.config.maintenance.correctiveMinutes, scheduledAt: null, status: MAINTENANCE_STATUS.PENDING });
+  }
+  assignMaintenance(maintenanceId, employeeIds = []) { const task = this._requireMaintenance(maintenanceId); task.assignEmployees(employeeIds); if ([MAINTENANCE_STATUS.PENDING, MAINTENANCE_STATUS.DELAYED].includes(task.status)) this.startMaintenance(maintenanceId); return task; }
+
+  autoAssignMaintenance(maintenanceId) {
+    const task = this._requireMaintenance(maintenanceId);
+    if (!this.employeeSystem?.listEmployees) return task;
+    const ids = this.employeeSystem.listEmployees().filter((employee) => employee.isOperational() && FACILITY_SERVICE_ROLE.maintenance.has(employee.roleId) && (!employee.currentFacilityId || employee.currentFacilityId === task.facilityId)).sort((a, b) => (this.employeeSystem.effectiveProductivity(b.employeeId) ?? 0) - (this.employeeSystem.effectiveProductivity(a.employeeId) ?? 0)).slice(0, task.requiredStaff).map((employee) => employee.employeeId);
+    if (ids.length) task.assignEmployees(ids);
+    return task;
+  }
+
+  startMaintenance(maintenanceId, at = this.simulation.getSnapshot().currentTime) {
+    const task = this._requireMaintenance(maintenanceId);
+    if ([MAINTENANCE_STATUS.COMPLETED, MAINTENANCE_STATUS.CANCELLED, MAINTENANCE_STATUS.IN_PROGRESS].includes(task.status)) return task;
+    if (!task.assignedEmployees.length && this.employeeSystem) this.autoAssignMaintenance(maintenanceId);
+    const staffingFactor = this._maintenanceStaffingFactor(task);
+    if (staffingFactor <= 0) { task.status = MAINTENANCE_STATUS.DELAYED; this._scheduleMaintenanceRetry(task, at); return task; }
+    const equipment = this._requireEquipment(task.equipmentId);
+    equipment.status = EQUIPMENT_STATUSES.MAINTENANCE;
+    task.status = staffingFactor < 1 ? MAINTENANCE_STATUS.DELAYED : MAINTENANCE_STATUS.IN_PROGRESS;
+    task.startedAt = asDate(at);
+    const duration = task.duration / Math.max(0.01, staffingFactor);
+    this.simulation.schedule({ at: new Date(task.startedAt.getTime() + duration * 60000), type: 'maintenance.completed', payload: { maintenanceId }, handler: ({ event }) => this.completeMaintenance(maintenanceId, event.at) });
+    this._recalculateFacility(equipment.facilityId);
+    this._syncEquipmentImpact(equipment);
+    this.simulation.logger.info('MaintenanceStartedEvent', { maintenanceId, equipmentId: task.equipmentId, at: task.startedAt.toISOString() });
+    return task;
+  }
+
+  completeMaintenance(maintenanceId, at = this.simulation.getSnapshot().currentTime) {
+    const task = this._requireMaintenance(maintenanceId);
+    const equipment = this._requireEquipment(task.equipmentId);
+    const completedAt = asDate(at);
+    const elapsed = task.startedAt ? Math.max(0, (completedAt - task.startedAt) / 60000) : 0;
+    task.completedAt = completedAt;
+    task.status = MAINTENANCE_STATUS.COMPLETED;
+    equipment.lastMaintenance = completedAt;
+    equipment.maintenanceDue = false;
+    equipment.operatingHours *= 0.25;
+    equipment.setHealth(100);
+    equipment.efficiency = 1;
+    equipment.status = EQUIPMENT_STATUSES.OPERATIONAL;
+    equipment.totalMaintenanceMinutes += elapsed;
+    if (equipment.failureStartedAt) equipment.downtimeMinutes += Math.max(0, (completedAt - equipment.failureStartedAt) / 60000);
+    equipment.failureStartedAt = null;
+    equipment.nextMaintenance = new Date(completedAt.getTime() + (equipment.maintenanceIntervalHours ?? this.config.maintenance.defaultIntervalHours) * 3600000);
+    this._recalculateFacility(equipment.facilityId);
+    this._syncEquipmentImpact(equipment);
+    this._resumeBoundServices(equipment.facilityId);
+    this.simulation.logger.info('MaintenanceCompletedEvent', { maintenanceId, equipmentId: task.equipmentId, at: completedAt.toISOString() });
+    return task;
+  }
+
+  calculateMaintenancePriority(equipmentId) {
+    const equipment = this._requireEquipment(equipmentId);
+    const facility = this._requireFacility(equipment.facilityId);
+    const w = this.config.maintenance.priorityWeights;
+    const safety = [EQUIPMENT_TYPES.SECURITY_LANE, EQUIPMENT_TYPES.XRAY_MACHINE, EQUIPMENT_TYPES.BOARDING_BRIDGE].includes(equipment.equipmentType) ? w.safetyWeight : 0;
+    const operational = equipment.capacity * w.operationalImpact;
+    const utilization = equipment.utilization * w.utilizationWeight;
+    const severity = (1 - equipment.health / 100) * w.failureSeverity;
+    const passenger = [EQUIPMENT_TYPES.CHECK_IN_COUNTER, EQUIPMENT_TYPES.SECURITY_LANE, EQUIPMENT_TYPES.ESCALATOR, EQUIPMENT_TYPES.ELEVATOR].includes(equipment.equipmentType) ? w.passengerImpact : 0;
+    const flight = [EQUIPMENT_TYPES.BOARDING_BRIDGE, EQUIPMENT_TYPES.BAGGAGE_SORTER, EQUIPMENT_TYPES.TOW_TRACTOR, EQUIPMENT_TYPES.FUELING_EQUIPMENT].includes(equipment.equipmentType) ? w.flightImpact : 0;
+    return Math.round((safety + operational + utilization + severity + passenger + flight + facility.maintenancePriority) * 100) / 100;
+  }
+
+  getGroundEquipmentFactor(facilityId, taskType = null) {
+    const types = normalizeGroundTypes(taskType);
+    const equipment = this.getEquipmentForFacility(facilityId).filter((item) => !types || types.includes(item.equipmentType));
+    if (!equipment.length) return 1;
+    const total = equipment.reduce((sum, item) => sum + item.capacity, 0);
+    const available = equipment.filter((item) => item.isAvailable()).reduce((sum, item) => sum + item.capacity * item.efficiency, 0);
+    return Math.min(1, available / Math.max(1, total));
+  }
+
+  getFailedEquipment() { return this.listEquipment().filter((item) => item.status === EQUIPMENT_STATUSES.FAILED); }
+  listMaintenance() { return [...this.maintenance.values()]; }
+  getMaintenance(id) { return this.maintenance.get(id) ?? null; }
+  getMaintenanceQueue() { return this.listMaintenance().filter((task) => [MAINTENANCE_STATUS.SCHEDULED, MAINTENANCE_STATUS.PENDING, MAINTENANCE_STATUS.DELAYED].includes(task.status)).sort((a, b) => b.priority - a.priority); }
+  getFacilityStatus(id) { const facility = this._requireFacility(id); return { ...facility, ...this.calculateFacilityCapacity(id) }; }
+  getEquipmentStatus(id) { return this._requireEquipment(id); }
+
+  statistics() {
+    const facilities = this.listFacilities();
+    const equipment = this.listEquipment();
+    const maintenance = this.listMaintenance();
+    const completed = maintenance.filter((task) => task.status === MAINTENANCE_STATUS.COMPLETED && task.startedAt && task.completedAt);
+    const avg = (items, fn) => items.length ? items.reduce((sum, item) => sum + fn(item), 0) / items.length : 0;
+    return {
+      facilities: {
+        totalFacilities: facilities.length,
+        operationalFacilities: facilities.filter((f) => f.operatingStatus === FACILITY_STATUSES.OPERATIONAL).length,
+        degradedFacilities: facilities.filter((f) => [FACILITY_STATUSES.DEGRADED, FACILITY_STATUSES.PARTIALLY_OPERATIONAL].includes(f.operatingStatus)).length,
+        maintenanceFacilities: facilities.filter((f) => f.operatingStatus === FACILITY_STATUSES.MAINTENANCE).length,
+        failedFacilities: facilities.filter((f) => f.operatingStatus === FACILITY_STATUSES.FAILED).length,
+        closedFacilities: facilities.filter((f) => f.operatingStatus === FACILITY_STATUSES.CLOSED).length,
+        facilities: facilities.map((f) => ({ facilityId: f.facilityId, health: f.health, utilization: f.utilization, availableCapacity: f.availableCapacity, effectiveCapacity: this.calculateFacilityCapacity(f.facilityId).effectiveCapacity, operatingStatus: f.operatingStatus, maintenanceStatus: f.maintenanceStatus })),
+      },
+      equipment: {
+        totalEquipment: equipment.length,
+        operationalEquipment: equipment.filter((e) => e.status === EQUIPMENT_STATUSES.OPERATIONAL).length,
+        degradedEquipment: equipment.filter((e) => e.status === EQUIPMENT_STATUSES.DEGRADED).length,
+        maintenanceEquipment: equipment.filter((e) => e.status === EQUIPMENT_STATUSES.MAINTENANCE).length,
+        failedEquipment: equipment.filter((e) => e.status === EQUIPMENT_STATUSES.FAILED).length,
+        offlineEquipment: equipment.filter((e) => e.status === EQUIPMENT_STATUSES.OFFLINE).length,
+        averageHealth: avg(equipment, (e) => e.health),
+        averageUtilization: avg(equipment, (e) => e.utilization),
+        failureCount: equipment.reduce((sum, e) => sum + e.failureCount, 0),
+        maintenanceCount: maintenance.length,
+        preventiveMaintenanceCount: maintenance.filter((m) => m.maintenanceType === MAINTENANCE_TYPES.PREVENTIVE).length,
+        correctiveMaintenanceCount: maintenance.filter((m) => m.maintenanceType === MAINTENANCE_TYPES.CORRECTIVE).length,
+        averageRepairTime: avg(completed.filter((m) => m.maintenanceType === MAINTENANCE_TYPES.CORRECTIVE), (m) => (m.completedAt - m.startedAt) / 60000),
+        averageMaintenanceTime: avg(completed, (m) => (m.completedAt - m.startedAt) / 60000),
+      },
+      maintenance: {
+        pendingMaintenance: maintenance.filter((m) => m.status === MAINTENANCE_STATUS.PENDING).length,
+        activeMaintenance: maintenance.filter((m) => m.status === MAINTENANCE_STATUS.IN_PROGRESS).length,
+        completedMaintenance: maintenance.filter((m) => m.status === MAINTENANCE_STATUS.COMPLETED).length,
+        delayedMaintenance: maintenance.filter((m) => m.status === MAINTENANCE_STATUS.DELAYED).length,
+        maintenanceBacklog: maintenance.filter((m) => [MAINTENANCE_STATUS.SCHEDULED, MAINTENANCE_STATUS.PENDING, MAINTENANCE_STATUS.DELAYED].includes(m.status)).length,
+        averageMaintenanceDuration: avg(completed, (m) => (m.completedAt - m.startedAt) / 60000),
+        equipmentDowntime: equipment.reduce((sum, e) => sum + e.downtimeMinutes, 0),
+        facilityDowntime: 0,
+      },
+      dataPolicy: FACILITY_DATA_POLICY,
+    };
+  }
+
+  _recalculateFacility(facilityId) {
+    const facility = this._requireFacility(facilityId);
+    const equipment = this.getEquipmentForFacility(facilityId);
+    const available = equipment.filter((item) => item.isAvailable());
+    const rawCapacity = available.reduce((sum, item) => sum + item.capacity * item.efficiency, 0);
+    facility.availableCapacity = equipment.length ? Math.min(facility.maxCapacity, Math.max(0, Math.floor(rawCapacity))) : facility.maxCapacity;
+    const availabilityRatio = equipment.length ? available.reduce((sum, item) => sum + item.capacity, 0) / Math.max(1, equipment.reduce((sum, item) => sum + item.capacity, 0)) : 1;
+    if (facility.operatingStatus !== FACILITY_STATUSES.CLOSED && facility.maintenanceStatus !== 'IN_PROGRESS') {
+      if (equipment.length && availabilityRatio <= 0) facility.operatingStatus = FACILITY_STATUSES.FAILED;
+      else if (facility.health < this.config.health.failedThreshold) facility.operatingStatus = FACILITY_STATUSES.PARTIALLY_OPERATIONAL;
+      else if (equipment.length && availabilityRatio < 1) facility.operatingStatus = FACILITY_STATUSES.DEGRADED;
+      else if (this.getFacilityOperationalFactor(facility) < 1) facility.operatingStatus = FACILITY_STATUSES.DEGRADED;
+      else facility.operatingStatus = FACILITY_STATUSES.OPERATIONAL;
+    }
+    return facility;
+  }
+
+  _staffCapacity(facilityId, fallback) {
+    if (!this.employeeSystem?.listEmployees) return fallback;
+    const employees = this.employeeSystem.listEmployees().filter((employee) => employee.isOperational() && employee.currentFacilityId === facilityId);
+    return employees.length ? employees.reduce((sum, employee) => sum + (this.employeeSystem.effectiveProductivity(employee.employeeId) ?? 0), 0) : 0;
+  }
+  _staffingFactor(staffCapacity, base) { return base > 0 ? Math.min(1, staffCapacity / base) : 1; }
+  _weightedEfficiency(items) { return items.length ? items.reduce((sum, item) => sum + item.efficiency * item.capacity, 0) / Math.max(1, items.reduce((sum, item) => sum + item.capacity, 0)) : 0; }
+  _calculateFailureProbability(equipment) {
+    const r = this.config.reliability;
+    const ageFactor = 1 + Math.max(0, equipment.age) * r.ageFactorPerYear;
+    const utilizationFactor = 1 + equipment.utilization * r.utilizationFactor;
+    const conditionFactor = 1 + (1 - equipment.health / 100) * r.conditionFactor;
+    const maintenanceFactor = equipment.maintenanceDue ? r.maintenanceFactor : 1;
+    return Math.min(1, r.baseFailureRatePerHour * ageFactor * utilizationFactor * conditionFactor * maintenanceFactor * Math.max(0.01, 1 / Math.max(0.01, equipment.reliability)));
+  }
+  _maintenanceStaffingFactor(task) {
+    if (!task.requiredStaff || !this.employeeSystem?.listEmployees) return this.employeeSystem ? 0 : 1;
+    const staff = task.assignedEmployees.map((id) => this.employeeSystem.getEmployee?.(id)).filter((employee) => employee?.isOperational());
+    if (!staff.length) return 0;
+    const capacity = staff.reduce((sum, employee) => sum + (this.employeeSystem.effectiveProductivity(employee.employeeId) ?? 0), 0);
+    return Math.min(1, capacity / task.requiredStaff);
+  }
+  _scheduleMaintenanceRetry(task, at) { this.simulation.schedule({ at: new Date(asDate(at).getTime() + 60000), type: 'maintenance.retry', payload: { maintenanceId: task.maintenanceId }, handler: ({ event }) => this.startMaintenance(task.maintenanceId, event.at) }); }
+  _syncEquipmentImpact(equipment) {
+    for (const queueId of this.queueBindings.keys()) if (this.queueBindings.get(queueId)?.facilityId === equipment.facilityId) this.syncQueueCapacity(queueId);
+    if (equipment.equipmentType === EQUIPMENT_TYPES.BOARDING_BRIDGE && this.gateSystem) {
+      const gateId = equipment.facilityId.startsWith('GATE_') ? equipment.facilityId.slice(5) : null;
+      const gate = gateId ? this.gateSystem.getGate?.(gateId) : null;
+      if (gate && equipment.status === EQUIPMENT_STATUSES.FAILED) gate.status = 'BLOCKED';
+      if (gate && equipment.status === EQUIPMENT_STATUSES.OPERATIONAL && gate.status === 'BLOCKED') gate.status = 'AVAILABLE';
+    }
+    if (equipment.facilityId.startsWith('RUNWAY_') && this.runwaySystem) {
+      const runway = this.runwaySystem.getRunway?.(equipment.facilityId.slice(7));
+      if (runway && equipment.status === EQUIPMENT_STATUSES.FAILED) runway.status = 'MAINTENANCE';
+      if (runway && equipment.status === EQUIPMENT_STATUSES.OPERATIONAL && runway.status === 'MAINTENANCE') runway.status = 'AVAILABLE';
+    }
+    this.flightImpactLog.push({ equipmentId: equipment.equipmentId, facilityId: equipment.facilityId, status: equipment.status, at: new Date(this.simulation.getSnapshot().currentTime) });
+    if (this.flightImpactLog.length > 1000) this.flightImpactLog.shift();
+  }
+  _resumeBoundServices(facilityId) { for (const queueId of this.queueBindings.keys()) if (this.queueBindings.get(queueId)?.facilityId === facilityId) this.syncQueueCapacity(queueId); }
+  _requireFacility(id) { const facility = this.facilities.get(id); if (!facility) throw new Error(`Unknown facility: ${id}`); return facility; }
+  _requireEquipment(id) { const equipment = this.equipment.get(id); if (!equipment) throw new Error(`Unknown equipment: ${id}`); return equipment; }
+  _requireMaintenance(id) { const task = this.maintenance.get(id); if (!task) throw new Error(`Unknown maintenance task: ${id}`); return task; }
+}
+
+function normalizeGroundTypes(taskType) {
+  if (!taskType) return null;
+  const key = String(taskType).replace(/[^A-Z0-9]/gi, '').toUpperCase();
+  return ({
+    BAGGAGELOAD: [EQUIPMENT_TYPES.BAGGAGE_CART, EQUIPMENT_TYPES.GROUND_SUPPORT_EQUIPMENT],
+    BAGGAGEUNLOAD: [EQUIPMENT_TYPES.BAGGAGE_CART, EQUIPMENT_TYPES.GROUND_SUPPORT_EQUIPMENT],
+    CATERING: [EQUIPMENT_TYPES.CATERING_VEHICLE, EQUIPMENT_TYPES.GROUND_SUPPORT_EQUIPMENT],
+    REFUELING: [EQUIPMENT_TYPES.FUELING_EQUIPMENT, EQUIPMENT_TYPES.GROUND_SUPPORT_EQUIPMENT],
+    PUSHBACK: [EQUIPMENT_TYPES.TOW_TRACTOR, EQUIPMENT_TYPES.GROUND_SUPPORT_EQUIPMENT],
+    BOARDINGSUPPORT: [EQUIPMENT_TYPES.GROUND_SUPPORT_EQUIPMENT],
+  })[key];
+}
