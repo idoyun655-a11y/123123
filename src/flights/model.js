@@ -33,6 +33,8 @@ export class Flight {
     turnaroundTime = 0,
     delayMinutes = 0,
     status = FLIGHT_STATUSES.SCHEDULED,
+    gateRequirements = {},
+    operationalFlags = {},
   }) {
     if (!flightId || !airline || !flightNumber || !aircraftType || !origin || !destination) {
       throw new TypeError('flightId, airline, flightNumber, aircraftType, origin, and destination are required.');
@@ -60,6 +62,8 @@ export class Flight {
     this.turnaroundTime = turnaroundTime;
     this.delayMinutes = delayMinutes;
     this.status = status;
+    this.gateRequirements = Object.freeze({ ...gateRequirements });
+    this.operationalFlags = Object.freeze({ ...operationalFlags });
     this.statusHistory = [];
   }
 
@@ -76,11 +80,13 @@ export class Flight {
 
   recordDelay(minutes, { at = null, reason = null } = {}) {
     if (!Number.isFinite(minutes) || minutes < 0) throw new RangeError('Delay minutes must be non-negative.');
-    this.delayMinutes = minutes;
-    if (minutes > 0) this.status = FLIGHT_STATUSES.DELAYED;
-    if (this.scheduledArrival) this.estimatedArrival = addMinutes(this.scheduledArrival, minutes);
-    if (this.scheduledDeparture) this.estimatedDeparture = addMinutes(this.scheduledDeparture, minutes);
-    this.statusHistory.push({ status: FLIGHT_STATUSES.DELAYED, at: at ? new Date(at) : null, reason });
+    if (minutes === 0) return this.delayMinutes;
+    this.delayMinutes += minutes;
+    this.status = FLIGHT_STATUSES.DELAYED;
+    if (this.scheduledArrival) this.estimatedArrival = addMinutes(this.scheduledArrival, this.delayMinutes);
+    if (this.scheduledDeparture) this.estimatedDeparture = addMinutes(this.scheduledDeparture, this.delayMinutes);
+    this.statusHistory.push({ status: FLIGHT_STATUSES.DELAYED, at: at ? new Date(at) : null, reason, addedDelayMinutes: minutes, totalDelayMinutes: this.delayMinutes });
+    return this.delayMinutes;
   }
 
   assignGate(gateId) { this.gate = gateId; }
@@ -105,6 +111,8 @@ export class Flight {
       turnaroundTime: this.turnaroundTime,
       delayMinutes: this.delayMinutes,
       status: this.status,
+      gateRequirements: { ...this.gateRequirements },
+      operationalFlags: { ...this.operationalFlags },
       statusHistory: this.statusHistory.map((entry) => ({ ...entry, at: dateToIso(entry.at) })),
     };
   }
