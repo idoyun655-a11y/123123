@@ -39,9 +39,9 @@ test('arrival lifecycle follows simulation time', () => {
   assert.equal(flight.status, FLIGHT_STATUSES.TAXIING);
   simulation.tick(10 * 60_000);
   assert.equal(flight.status, FLIGHT_STATUSES.AT_GATE);
-  simulation.tick(15 * 60_000);
-  assert.equal(flight.status, FLIGHT_STATUSES.BOARDING);
   simulation.tick(30 * 60_000);
+  assert.equal(flight.status, FLIGHT_STATUSES.BOARDING);
+  simulation.tick(15 * 60_000);
   assert.equal(flight.status, FLIGHT_STATUSES.READY);
 });
 
