@@ -1,0 +1,18 @@
+import { Employee, EMPLOYEE_STATUSES } from './model.js';
+
+export class StaffingSystem {
+  #facilities = new Map();
+  constructor({ employees, roles, queueEngine = null, config = {} } = {}) { this.employees = employees; this.roles = roles; this.queueEngine = queueEngine; this.config = config; }
+  registerFacility({ facilityId, requiredStaff = 0, minimumStaff = 0, targetStaff = requiredStaff, queueId = null, serviceType = null, allowedRoleIds = [], baseServerCount = null, operatingStatus = 'OPERATIONAL' } = {}) { if (!facilityId) throw new TypeError('facilityId is required.'); const record = { facilityId, requiredStaff: Math.max(0, Number(requiredStaff) || 0), minimumStaff: Math.max(0, Number(minimumStaff) || 0), targetStaff: Math.max(0, Number(targetStaff) || 0), queueId, serviceType, allowedRoleIds: [...allowedRoleIds], baseServerCount, operatingStatus }; this.#facilities.set(facilityId, record); this.#sync(facilityId); return record; }
+  getFacility(facilityId) { const f = this.#facilities.get(facilityId); return f ? this.getFacilityStatus(facilityId) : null; }
+  listFacilities() { return [...this.#facilities.keys()].map((id) => this.getFacilityStatus(id)); }
+  setRequiredStaff(facilityId, requiredStaff) { const f = this.#require(facilityId); f.requiredStaff = Math.max(0, Number(requiredStaff) || 0); this.#sync(facilityId); return this.getFacilityStatus(facilityId); }
+  syncAll() { for (const id of this.#facilities.keys()) this.#sync(id); return this.listFacilities(); }
+  getAvailableEmployees(facilityId) { const f = this.#require(facilityId); return this.employees.filter((e) => e.currentFacilityId === facilityId && this.#roleAllowed(e, f) && e.isOperational()); }
+  getFacilityStatus(facilityId) { const f = this.#require(facilityId); const assigned = this.employees.filter((e) => e.currentFacilityId === facilityId && this.#roleAllowed(e, f)); const available = assigned.filter((e) => e.isOperational()); const effectiveServiceRate = available.reduce((sum, e) => sum + this.#employeeCapacity(e), 0); const effectiveServerCount = effectiveServiceRate > 0 ? Math.max(1, Math.floor(effectiveServiceRate)) : 0; const staffingRatio = f.requiredStaff > 0 ? available.length / f.requiredStaff : 1; return { ...f, assignedStaff: assigned.length, availableStaff: available.length, staffingRatio, staffingShortage: Math.max(0, f.requiredStaff - available.length), overstaffedBy: Math.max(0, available.length - f.requiredStaff), effectiveServiceRate, effectiveServerCount }; }
+  applyToQueue(facilityId) { const status = this.getFacilityStatus(facilityId); if (!status.queueId || !this.queueEngine) return status; if (typeof this.queueEngine.updateServiceCapacity === 'function') this.queueEngine.updateServiceCapacity(status.queueId, { serverCount: status.effectiveServerCount, serviceRateMultiplier: 1 }); return status; }
+  #sync(id) { const status = this.getFacilityStatus(id); if (status.queueId && this.queueEngine && typeof this.queueEngine.updateServiceCapacity === 'function') this.queueEngine.updateServiceCapacity(status.queueId, { serverCount: status.effectiveServerCount, serviceRateMultiplier: 1 }); }
+  #employeeCapacity(employee) { const role = this.roles.get(employee.roleId); const max = role?.maxProductivity ?? this.config?.maxProductivity ?? 1; return Math.max(0, Math.min(max, employee.productivity)); }
+  #roleAllowed(employee, facility) { return !facility.allowedRoleIds.length || facility.allowedRoleIds.includes(employee.roleId); }
+  #require(id) { const f = this.#facilities.get(id); if (!f) throw new Error(`Unknown staffing facility: ${id}`); return f; }
+}
