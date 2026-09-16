@@ -6,17 +6,18 @@ export class FlightSimulationSystem {
   #flights = new Map();
   #scheduledEventIds = new Map();
 
-  constructor(simulation) {
-    if (!simulation || typeof simulation.schedule !== 'function') {
-      throw new TypeError('A SimulationCore-compatible instance is required.');
-    }
+  constructor(simulation, { gateSystem = null, runwaySystem = null } = {}) {
+    if (!simulation || typeof simulation.schedule !== 'function') throw new TypeError('A SimulationCore-compatible instance is required.');
     this.simulation = simulation;
+    this.gateSystem = gateSystem;
+    this.runwaySystem = runwaySystem;
   }
 
   addFlight(flight) {
     if (!flight || !flight.flightId) throw new TypeError('A valid Flight is required.');
     if (this.#flights.has(flight.flightId)) throw new Error(`Flight already exists: ${flight.flightId}`);
     this.#flights.set(flight.flightId, flight);
+    if (this.gateSystem) this.gateSystem.prepareFlightGate(flight);
     this.#scheduleInitialLifecycle(flight);
     return flight.flightId;
   }
@@ -28,6 +29,8 @@ export class FlightSimulationSystem {
     const flight = this.#requireFlight(flightId);
     if (flight.status === FLIGHT_STATUSES.CANCELLED) return false;
     flight.transitionTo(FLIGHT_STATUSES.CANCELLED, { at: this.simulation.getSnapshot().currentTime, reason });
+    this.gateSystem?.releaseGate(flightId);
+    this.runwaySystem?.cancelRequests(flightId);
     return true;
   }
 
@@ -43,10 +46,10 @@ export class FlightSimulationSystem {
         }
         if (current.status === FLIGHT_STATUSES.SCHEDULED || current.status === FLIGHT_STATUSES.DELAYED) {
           current.transitionTo(FLIGHT_STATUSES.APPROACHING, { at: event.at, reason: 'estimated arrival reached' });
+          this.#requestLanding(current);
         }
       };
       this.#scheduleAt(flight, flight.estimatedArrival ?? flight.scheduledArrival, 'flight.approach', approachHandler);
-      this.#scheduleLandingEvent(flight, flight.estimatedArrival ?? flight.scheduledArrival);
     }
 
     if (flight.scheduledDeparture) {
@@ -59,18 +62,48 @@ export class FlightSimulationSystem {
           return;
         }
         if ([FLIGHT_STATUSES.READY, FLIGHT_STATUSES.AT_GATE, FLIGHT_STATUSES.BOARDING, FLIGHT_STATUSES.DELAYED].includes(current.status)) {
-          current.transitionTo(FLIGHT_STATUSES.DEPARTING, { at: event.at, reason: 'estimated departure reached' });
-          const airborneAt = new Date(event.at.getTime() + 5 * 60_000);
-          this.#scheduleAt(current, airborneAt, 'flight.airborne', ({ event: airborneEvent }) => {
-            const latest = this.#requireFlight(airborneEvent.payload.flightId);
-            if (latest.status === FLIGHT_STATUSES.DEPARTING) {
-              latest.transitionTo(FLIGHT_STATUSES.AIRBORNE, { at: airborneEvent.at, reason: 'departure completed' });
-            }
-          });
+          this.#requestDeparture(current);
         }
       };
       this.#scheduleAt(flight, flight.estimatedDeparture ?? flight.scheduledDeparture, 'flight.departure', departureHandler);
     }
+  }
+
+  #requestLanding(flight) {
+    if (!this.runwaySystem) {
+      this.#scheduleLandingEvent(flight, flight.estimatedArrival ?? flight.scheduledArrival);
+      return;
+    }
+    this.runwaySystem.requestLanding(flight, {
+      onStart: ({ at }) => {
+        if (flight.status !== FLIGHT_STATUSES.CANCELLED) {
+          flight.transitionTo(FLIGHT_STATUSES.LANDED, { at, reason: 'runway landing slot started' });
+          this.#scheduleGroundPhases(flight, at);
+        }
+      },
+    });
+  }
+
+  #requestDeparture(flight) {
+    if (!this.runwaySystem) {
+      flight.transitionTo(FLIGHT_STATUSES.DEPARTING, { at: this.simulation.getSnapshot().currentTime, reason: 'scheduled departure reached' });
+      this.gateSystem?.releaseGate(flight.flightId);
+      const airborneAt = new Date(this.simulation.getSnapshot().currentTime.getTime() + 5 * 60_000);
+      this.#scheduleAt(flight, airborneAt, 'flight.airborne', ({ event }) => {
+        if (flight.status === FLIGHT_STATUSES.DEPARTING) flight.transitionTo(FLIGHT_STATUSES.AIRBORNE, { at: event.at, reason: 'departure completed' });
+      });
+      return;
+    }
+    this.runwaySystem.requestDeparture(flight, {
+      onStart: ({ at }) => {
+        if (flight.status === FLIGHT_STATUSES.CANCELLED) return;
+        this.gateSystem?.releaseGate(flight.flightId, at);
+        flight.transitionTo(FLIGHT_STATUSES.DEPARTING, { at, reason: 'runway departure slot started' });
+      },
+      onRelease: ({ at }) => {
+        if (flight.status === FLIGHT_STATUSES.DEPARTING) flight.transitionTo(FLIGHT_STATUSES.AIRBORNE, { at, reason: 'runway occupancy completed' });
+      },
+    });
   }
 
   #scheduleLandingEvent(flight, arrivalTime) {
@@ -101,13 +134,27 @@ export class FlightSimulationSystem {
     const gateAt = new Date(landedAt.getTime() + 15 * 60_000);
     this.#scheduleAt(flight, gateAt, 'flight.at_gate', ({ event }) => {
       const current = this.#requireFlight(event.payload.flightId);
+      if (this.gateSystem) {
+        if (this.gateSystem.occupyGate(current.flightId, event.at)) {
+          current.transitionTo(FLIGHT_STATUSES.AT_GATE, { at: event.at, reason: 'gate occupied' });
+          return;
+        }
+        this.gateSystem.waitForGate(current, () => {
+          if (current.status !== FLIGHT_STATUSES.CANCELLED) current.transitionTo(FLIGHT_STATUSES.AT_GATE, { at: this.simulation.getSnapshot().currentTime, reason: 'gate assigned after waiting' });
+          this.gateSystem.occupyGate(current.flightId);
+        });
+        return;
+      }
       if (current.status === FLIGHT_STATUSES.TAXIING || current.status === FLIGHT_STATUSES.LANDED) current.transitionTo(FLIGHT_STATUSES.AT_GATE, { at: event.at, reason: 'gate arrival' });
     });
 
     const boardingAt = new Date(landedAt.getTime() + Math.max(15, flight.turnaroundTime - 45) * 60_000);
     this.#scheduleAt(flight, boardingAt, 'flight.boarding', ({ event }) => {
       const current = this.#requireFlight(event.payload.flightId);
-      if (current.status === FLIGHT_STATUSES.AT_GATE) current.transitionTo(FLIGHT_STATUSES.BOARDING, { at: event.at, reason: 'turnaround boarding phase' });
+      if (current.status === FLIGHT_STATUSES.AT_GATE) {
+        this.gateSystem?.setBoarding(current.flightId);
+        current.transitionTo(FLIGHT_STATUSES.BOARDING, { at: event.at, reason: 'turnaround boarding phase' });
+      }
     });
 
     const readyAt = new Date(landedAt.getTime() + Math.max(15, flight.turnaroundTime - 15) * 60_000);
@@ -124,13 +171,6 @@ export class FlightSimulationSystem {
     return eventId;
   }
 
-  #isStale(eventAt, expectedAt) {
-    return Math.abs(eventAt.getTime() - expectedAt.getTime()) > EVENT_TOLERANCE_MS;
-  }
-
-  #requireFlight(flightId) {
-    const flight = this.#flights.get(flightId);
-    if (!flight) throw new Error(`Unknown flight: ${flightId}`);
-    return flight;
-  }
+  #isStale(eventAt, expectedAt) { return Math.abs(eventAt.getTime() - expectedAt.getTime()) > EVENT_TOLERANCE_MS; }
+  #requireFlight(flightId) { const flight = this.#flights.get(flightId); if (!flight) throw new Error(`Unknown flight: ${flightId}`); return flight; }
 }
