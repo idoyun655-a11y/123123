@@ -6,6 +6,10 @@ import { BAGGAGE_STATUSES } from './model.js';
 export class BaggageHandlingSystem extends BaseBaggageHandlingSystem {
   constructor(...args) { super(...args); this.#stabilizeQueues(); }
   getQueue(queueId) { return this.queueEngine.getQueue(queueId); }
+  onPassengerCheckInCompleted(passenger, at = this.simulation.getSnapshot().currentTime) {
+    const created = super.onPassengerCheckInCompleted(passenger, at);
+    return created.length ? created : super.generateForPassenger(passenger, { at, count: 1 });
+  }
   attachEmployeeSystem(system) {
     const result = super.attachEmployeeSystem(system);
     const hasBaggageStaff = Boolean(system?.listEmployees?.().some((employee) => ['BaggageHandler', 'BaggageSupervisor', 'GroundHandler'].includes(employee.roleId)));
@@ -36,8 +40,6 @@ export class BaggageHandlingSystem extends BaseBaggageHandlingSystem {
     if (sorting?.processor && !sorting.processor.__stage9Wrapped) {
       const originalStart = sorting.processor.onStart;
       sorting.processor.onStart = (b, at) => { if (b.currentStatus === BAGGAGE_STATUSES.SCREENING) b.transitionTo(BAGGAGE_STATUSES.SORTING, { at, zone: `SORTING_${b.flightId}`, force: true }); else originalStart?.(b, at); };
-      const originalComplete = sorting.processor.onComplete;
-      sorting.processor.onComplete = (b, at) => { originalComplete?.(b, at); if ([BAGGAGE_STATUSES.TRANSFER_TO_AIRCRAFT, BAGGAGE_STATUSES.CONNECTING_FLIGHT].includes(b.currentStatus) && !isQueued(this.queueEngine.getQueue('BAGGAGE_LOADING_QUEUE'), b.baggageId)) this.queueEngine.enqueue('BAGGAGE_LOADING_QUEUE', b, { at, priority: b.priority }); };
       sorting.processor.__stage9Wrapped = true;
     }
     const transfer = this.queueEngine.getQueue('BAGGAGE_TRANSFER_SORTING_QUEUE');
@@ -53,7 +55,5 @@ export class BaggageHandlingSystem extends BaseBaggageHandlingSystem {
     }
   }
 }
-
-function isQueued(queue, baggageId) { if (!queue) return false; if (queue.waiting?.some((entry) => entry.passenger === baggageId || entry.passenger?.baggageId === baggageId)) return true; return Boolean(queue.active && [...queue.active.values()].some((entry) => entry.passenger === baggageId || entry.passenger?.baggageId === baggageId)); }
 export { GroundTask, GroundResource, GROUND_TASK_STATUS, GROUND_TASK_TYPES, GROUND_RESOURCE_TYPES, GROUND_RESOURCE_STATUS } from '../ground/model.js';
 export { GroundHandlingSystem } from '../ground/system.js';
