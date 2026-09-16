@@ -26,6 +26,8 @@ export class Gate {
     estimatedReleaseTime = null,
     maintenanceStatus = 'NORMAL',
     sourceType = 'ESTIMATED',
+    properties = {},
+    airlinePreferences = [],
   }) {
     if (!gateId || !terminalId) throw new TypeError('gateId and terminalId are required.');
     if (!Object.values(GATE_STATUSES).includes(status)) throw new RangeError(`Invalid gate status: ${status}`);
@@ -44,6 +46,8 @@ export class Gate {
     this.estimatedReleaseTime = estimatedReleaseTime;
     this.maintenanceStatus = maintenanceStatus;
     this.sourceType = sourceType;
+    this.properties = Object.freeze({ ...properties });
+    this.airlinePreferences = Object.freeze([...airlinePreferences]);
     this.reservations = [];
   }
 
@@ -65,7 +69,7 @@ export class Gate {
     if (!this.isOperational()) return false;
     if (this.conflicts(start, end, flightId)) return false;
     this.reservations.push({ flightId, startMs: new Date(start).getTime(), endMs: new Date(end).getTime(), status: GATE_STATUSES.RESERVED });
-    this.status = GATE_STATUSES.RESERVED;
+    this.#refreshAggregateStatus();
     this.estimatedReleaseTime = new Date(end);
     return true;
   }
@@ -93,10 +97,10 @@ export class Gate {
     const before = this.reservations.length;
     this.reservations = this.reservations.filter((item) => item.flightId !== flightId);
     if (before === this.reservations.length) return false;
-    this.status = GATE_STATUSES.AVAILABLE;
     this.currentFlightId = null;
     this.occupiedSince = null;
     this.estimatedReleaseTime = null;
+    this.#refreshAggregateStatus();
     return true;
   }
 
@@ -106,9 +110,23 @@ export class Gate {
     if (future.length === 0) return new Date(now);
     return new Date(Math.min(...future.map((item) => item.endMs)));
   }
-}
 
-export const GateAssignmentDefaults = Object.freeze({
-  unknownCompatibilityScore: 0,
-  exactMatchScore: 1,
-});
+  #refreshAggregateStatus() {
+    if (this.status === GATE_STATUSES.BLOCKED || this.status === GATE_STATUSES.MAINTENANCE) return;
+    const active = this.reservations.filter((item) => ACTIVE_RESERVATION_STATUSES.has(item.status));
+    if (active.some((item) => item.status === GATE_STATUSES.BOARDING)) {
+      this.status = GATE_STATUSES.BOARDING;
+      this.currentFlightId = active.find((item) => item.status === GATE_STATUSES.BOARDING)?.flightId ?? null;
+    } else if (active.some((item) => item.status === GATE_STATUSES.OCCUPIED)) {
+      this.status = GATE_STATUSES.OCCUPIED;
+      this.currentFlightId = active.find((item) => item.status === GATE_STATUSES.OCCUPIED)?.flightId ?? null;
+    } else if (active.length > 0) {
+      this.status = GATE_STATUSES.RESERVED;
+      this.currentFlightId = null;
+      this.estimatedReleaseTime = new Date(Math.min(...active.map((item) => item.endMs)));
+    } else {
+      this.status = GATE_STATUSES.AVAILABLE;
+      this.currentFlightId = null;
+    }
+  }
+}
