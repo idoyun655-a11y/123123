@@ -66,7 +66,7 @@ export class Runway {
 
 export const RUNWAY_REQUEST_TYPES = Object.freeze({ LANDING: 'LANDING', DEPARTURE: 'DEPARTURE' });
 
-export function calculateRunwayPriority(flight, requestedAt, requestType, now = requestedAt) {
+export function calculateRunwayPriority(flight, requestedAt, requestType, now = requestedAt, weights = RUNWAY_PRIORITY_WEIGHTS) {
   const nowMs = new Date(now).getTime();
   const requestedMs = new Date(requestedAt).getTime();
   const scheduledValue = requestType === RUNWAY_REQUEST_TYPES.LANDING
@@ -76,10 +76,10 @@ export function calculateRunwayPriority(flight, requestedAt, requestType, now = 
   const waitingMinutes = Math.max(0, (nowMs - requestedMs) / 60_000);
   const minutesUntilScheduled = Math.max(0, (scheduledMs - nowMs) / 60_000);
   const scheduledUrgency = 1 / (1 + minutesUntilScheduled);
-  const emergency = flight.operationalFlags?.emergency ? RUNWAY_PRIORITY_WEIGHTS.emergency : 0;
-  const state = flight.status === 'DELAYED' ? RUNWAY_PRIORITY_WEIGHTS.state : 0;
-  const delay = (flight.delayMinutes ?? 0) * RUNWAY_PRIORITY_WEIGHTS.delayMinutes;
-  return emergency + delay + waitingMinutes * RUNWAY_PRIORITY_WEIGHTS.waitingMinutes + scheduledUrgency * RUNWAY_PRIORITY_WEIGHTS.scheduledTime + state;
+  const emergency = flight.operationalFlags?.emergency ? weights.emergency : 0;
+  const state = flight.status === 'DELAYED' ? weights.state : 0;
+  const delay = (flight.delayMinutes ?? 0) * weights.delayMinutes;
+  return emergency + delay + waitingMinutes * weights.waitingMinutes + scheduledUrgency * weights.scheduledTime + state;
 }
 
 export function operationDuration(requestType) {
