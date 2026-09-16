@@ -10,8 +10,8 @@ function makeFlight(overrides = {}) {
     flightId: 'KE001', airline: 'Korean Air', flightNumber: 'KE001', aircraftType: 'B77W',
     origin: 'NRT', destination: 'ICN',
     scheduledArrival: '2026-01-01T00:10:00.000Z',
-    scheduledDeparture: '2026-01-01T01:10:00.000Z',
-    passengerCount: 300, cargoWeight: 12000, gate: 'GATE-T2-01', runway: 'RWY-3', turnaroundTime: 60,
+    scheduledDeparture: '2026-01-01T01:40:00.000Z',
+    passengerCount: 300, cargoWeight: 12000, gate: 'GATE-T2-01', runway: 'RWY-3', turnaroundTime: 90,
     ...overrides,
   });
 }
@@ -39,11 +39,11 @@ test('arrival lifecycle follows simulation time', () => {
   assert.equal(flight.status, FLIGHT_STATUSES.LANDED);
   simulation.tick(5 * 60_000);
   assert.equal(flight.status, FLIGHT_STATUSES.TAXIING);
-  simulation.tick(5 * 60_000);
+  simulation.tick(10 * 60_000);
   assert.equal(flight.status, FLIGHT_STATUSES.AT_GATE);
-  simulation.tick(5 * 60_000);
+  simulation.tick(15 * 60_000);
   assert.equal(flight.status, FLIGHT_STATUSES.BOARDING);
-  simulation.tick(20 * 60_000);
+  simulation.tick(30 * 60_000);
   assert.equal(flight.status, FLIGHT_STATUSES.READY);
 });
 
@@ -55,7 +55,7 @@ test('departure lifecycle reaches airborne', () => {
   flights.addFlight(flight);
   simulation.resume();
 
-  simulation.tick(70 * 60_000);
+  simulation.tick(100 * 60_000);
   assert.equal(flight.status, FLIGHT_STATUSES.DEPARTING);
   simulation.tick(5 * 60_000);
   assert.equal(flight.status, FLIGHT_STATUSES.AIRBORNE);
@@ -66,7 +66,7 @@ test('delay updates estimated times and marks flight delayed', () => {
   flight.recordDelay(20, { reason: 'test delay' });
   assert.equal(flight.status, FLIGHT_STATUSES.DELAYED);
   assert.equal(flight.estimatedArrival.toISOString(), '2026-01-01T00:30:00.000Z');
-  assert.equal(flight.estimatedDeparture.toISOString(), '2026-01-01T01:30:00.000Z');
+  assert.equal(flight.estimatedDeparture.toISOString(), '2026-01-01T02:00:00.000Z');
 });
 
 test('cancelled flight cannot re-enter the lifecycle', () => {
