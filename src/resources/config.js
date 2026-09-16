@@ -12,7 +12,7 @@ export const RUNWAY_PRIORITY_WEIGHTS = Object.freeze({
   emergency: 1000,
   delayMinutes: 2,
   waitingMinutes: 1,
-  scheduledTime: 0.001,
+  scheduledTime: 10,
   state: 10,
 });
 
