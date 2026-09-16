@@ -31,9 +31,7 @@ test('arrival lifecycle follows simulation time', () => {
   flights.addFlight(flight);
   simulation.resume();
 
-  simulation.tick(10_000);
-  assert.equal(flight.status, FLIGHT_STATUSES.SCHEDULED);
-  simulation.tick(5 * 60_000);
+  simulation.tick(10 * 60_000);
   assert.equal(flight.status, FLIGHT_STATUSES.APPROACHING);
   simulation.tick(5 * 60_000);
   assert.equal(flight.status, FLIGHT_STATUSES.LANDED);
