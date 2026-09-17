@@ -1,0 +1,94 @@
+import { WEATHER_CONDITIONS, WEATHER_DATA_POLICY, WEATHER_IMPACTS, WEATHER_PROFILE } from './config.js';
+
+const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+const parseMinute = (value) => { const [h, m] = String(value).split(':').map(Number); return h * 60 + m; };
+
+export class WeatherSystem {
+  constructor(simulation, { random = Math.random, profile = WEATHER_PROFILE, alertCenter = null } = {}) {
+    if (!simulation || typeof simulation.schedule !== 'function') throw new TypeError('A SimulationCore-compatible instance is required.');
+    this.simulation = simulation;
+    this.random = random;
+    this.profile = [...profile].sort((a, b) => parseMinute(a.time) - parseMinute(b.time));
+    this.alertCenter = alertCenter;
+    this.timeline = [];
+    this.current = null;
+    this.sequence = 0;
+    this.started = false;
+  }
+
+  initialize(startTime = this.simulation.getSnapshot().currentTime) {
+    if (this.started) return this.current;
+    this.started = true;
+    const start = new Date(startTime);
+    const day = new Date(start); day.setUTCHours(0, 0, 0, 0);
+    for (let d = 0; d < 3; d += 1) {
+      for (const entry of this.profile) {
+        const at = new Date(day.getTime() + (parseMinute(entry.time) + d * 1440) * 60000);
+        if (at.getTime() < start.getTime() - 3600000) continue;
+        this.scheduleWeather(at, entry);
+      }
+    }
+    this.update(start);
+    return this.current;
+  }
+
+  scheduleWeather(at, profileEntry) {
+    return this.simulation.schedule({
+      at: new Date(at), type: 'weather.transition', payload: { profile: profileEntry }, priority: 5,
+      handler: ({ event }) => this.applyProfile(event.at, event.payload.profile),
+    });
+  }
+
+  applyProfile(timestamp, profileEntry) {
+    const selectedCondition = this.random() <= Number(profileEntry.probability ?? 1)
+      ? profileEntry.condition
+      : this.randomCondition(profileEntry.condition);
+    const condition = WEATHER_CONDITIONS[selectedCondition] ? selectedCondition : 'CLEAR';
+    const impact = WEATHER_IMPACTS[condition];
+    const temperature = this.range(profileEntry.temperatureRange, 0);
+    const visibility = this.range(profileEntry.visibilityRange, 1);
+    const windSpeed = this.range(profileEntry.windRange, 1);
+    const precipitation = this.range(profileEntry.precipitationRange, 2);
+    const windDirection = Math.round(this.random() * 359);
+    const severity = this.severityFor(condition, visibility, windSpeed, precipitation);
+    this.current = Object.freeze({
+      weatherId: `weather-${++this.sequence}`, timestamp: new Date(timestamp), condition, temperature, humidity: Math.round(clamp(55 + precipitation * 1.5 + this.random() * 20, 35, 100)),
+      visibility, windSpeed, windDirection, precipitation, runwayCondition: this.runwayCondition(condition, precipitation), severity,
+      runwayCapacityMultiplier: impact.runwayCapacityMultiplier, groundDurationMultiplier: impact.groundDurationMultiplier,
+      flightDelayMultiplier: impact.flightDelayMultiplier, visibilityImpact: impact.visibilityImpact, windImpact: impact.windImpact,
+      sourceType: WEATHER_DATA_POLICY.sourceType, impactType: WEATHER_DATA_POLICY.impactType,
+    });
+    this.timeline.push(this.current);
+    if (this.timeline.length > 96) this.timeline.splice(0, this.timeline.length - 96);
+    this.emitAlertIfNeeded(this.current);
+    return this.current;
+  }
+
+  update(timestamp = this.simulation.getSnapshot().currentTime) {
+    if (!this.started) this.initialize(timestamp);
+    const time = new Date(timestamp).getTime();
+    const candidates = this.timeline.filter(item => item.timestamp.getTime() <= time);
+    if (candidates.length) this.current = candidates[candidates.length - 1];
+    return this.current;
+  }
+
+  currentWeather() { return this.current ? { ...this.current } : null; }
+  history(limit = 24) { return this.timeline.slice(-limit).map(item => ({ ...item })); }
+  getOperationalImpact() { const w = this.current ?? this.applyProfile(this.simulation.getSnapshot().currentTime, this.profile[0]); return { runwayCapacityMultiplier: w.runwayCapacityMultiplier, groundDurationMultiplier: w.groundDurationMultiplier, flightDelayMultiplier: w.flightDelayMultiplier, visibilityImpact: w.visibilityImpact, windImpact: w.windImpact, runwayCondition: w.runwayCondition }; }
+  getRunwayCapacityMultiplier() { return this.getOperationalImpact().runwayCapacityMultiplier; }
+  getGroundDurationMultiplier() { return this.getOperationalImpact().groundDurationMultiplier; }
+  getFlightImpact() { const w = this.currentWeather() ?? this.applyProfile(this.simulation.getSnapshot().currentTime, this.profile[0]); return { weatherDelay: w.flightDelayMultiplier, weatherRisk: this.riskLevel(w), visibilityImpact: w.visibilityImpact, windImpact: w.windImpact }; }
+  alerts() { return this.alertCenter?.list?.({ includeResolved: false }).filter(a => a.sourceType === 'WEATHER') ?? []; }
+
+  range(range, decimals = 0) { const [min, max] = range ?? [0, 0]; const value = min + (max - min) * this.random(); const factor = 10 ** decimals; return Math.round(value * factor) / factor; }
+  randomCondition(fallback) { const options = Object.values(WEATHER_CONDITIONS); return options[Math.floor(this.random() * options.length)] ?? fallback; }
+  runwayCondition(condition, precipitation) { if (['SNOW', 'HEAVY_SNOW'].includes(condition)) return 'SNOW_COVERED'; if (precipitation >= 8) return 'WET'; if (precipitation > 0) return 'DAMP'; return 'DRY'; }
+  severityFor(condition, visibility, windSpeed, precipitation) { if (condition === 'THUNDERSTORM' || condition === 'HEAVY_SNOW' || visibility < 2 || windSpeed >= 20) return 'CRITICAL'; if (condition === 'HEAVY_RAIN' || condition === 'STRONG_WIND' || precipitation >= 8 || visibility < 4) return 'HIGH'; if (condition === 'RAIN' || condition === 'FOG' || condition === 'SNOW' || visibility < 7) return 'MEDIUM'; return 'LOW'; }
+  riskLevel(weather) { return weather.severity; }
+  emitAlertIfNeeded(weather) {
+    if (!this.alertCenter || weather.severity === 'LOW') return null;
+    const severity = weather.severity === 'CRITICAL' ? 'CRITICAL' : weather.severity === 'HIGH' ? 'WARNING' : 'NOTICE';
+    const title = weather.condition.replaceAll('_', ' ');
+    return this.alertCenter.emit({ severity, category: 'WEATHER', title: `Weather: ${title}`, message: `Visibility ${weather.visibility} km · Wind ${weather.windSpeed} m/s · Runway ${weather.runwayCondition}`, sourceType: 'WEATHER', sourceId: weather.weatherId, createdAt: weather.timestamp });
+  }
+}
