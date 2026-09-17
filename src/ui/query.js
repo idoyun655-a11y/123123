@@ -1,14 +1,4 @@
-const arrayOf = (value) => Array.isArray(value) ? value : [];
-const valuesOf = (system, keys = []) => {
-  for (const key of keys) {
-    if (!system) continue;
-    const value = typeof system[key] === 'function' ? system[key]() : system[key];
-    if (Array.isArray(value)) return value;
-    if (value instanceof Map) return [...value.values()];
-    if (value && typeof value === 'object') return Object.values(value);
-  }
-  return [];
-};
+const valuesOf = (system, keys = []) => { for (const key of keys) { if (!system) continue; const value = typeof system[key] === 'function' ? system[key]() : system[key]; if (Array.isArray(value)) return value; if (value instanceof Map) return [...value.values()]; if (value && typeof value === 'object') return Object.values(value); } return []; };
 export class OperationsQuery {
   constructor({ simulation, systems = {}, dataRegistry = null, runtime = null } = {}) { this.simulation = simulation; this.systems = systems; this.dataRegistry = dataRegistry; this.runtime = runtime; }
   simulationState() { return this.simulation?.getSnapshot?.() ?? this.simulation?.state ?? { status: 'paused', speed: 1, currentTime: new Date(), queuedEventCount: 0 }; }
@@ -26,12 +16,8 @@ export class OperationsQuery {
   weather() { return this.systems.weather?.currentWeather?.() ?? this.runtime?.weatherSystem?.currentWeather?.() ?? null; }
   weatherHistory(limit = 24) { return this.systems.weather?.history?.(limit) ?? this.runtime?.weatherSystem?.history?.(limit) ?? []; }
   weatherAlerts() { return this.runtime?.alertCenter?.list?.({ includeResolved: false }).filter(a => a.sourceType === 'WEATHER') ?? []; }
-  kpis() {
-    const flights = this.flights(); const passengers = this.passengers(); const bags = this.baggage(); const tasks = this.groundTasks(); const employees = this.employees(); const facilities = this.facilities(); const equipment = this.equipment();
-    const delayed = flights.filter(f => ['DELAYED', 'DELAY'].includes(String(f.status ?? f.state).toUpperCase())).length; const active = passengers.filter(p => !['COMPLETED', 'CLAIMED'].includes(String(p.status ?? '').toUpperCase())).length; const failed = equipment.filter(e => String(e.status ?? '').toUpperCase() === 'FAILED').length; const maintenance = this.maintenance().filter(m => !['COMPLETED', 'CANCELLED'].includes(String(m.status ?? '').toUpperCase())).length; const weather = this.weather();
-    return { activeFlights: flights.length, delayedFlights: delayed, totalPassengers: passengers.length, activePassengers: active, totalBaggage: bags.length, activeGroundTasks: tasks.filter(t => !['COMPLETED', 'CANCELLED'].includes(String(t.status ?? '').toUpperCase())).length, employees: employees.length, failedEquipment: failed, maintenanceQueue: maintenance, facilities: facilities.length, capacityLoss: facilities.reduce((n, f) => n + Math.max(0, Number(f.maxCapacity ?? f.capacity ?? 0) - Number(f.availableCapacity ?? f.capacity ?? 0)), 0), weatherSeverity: weather?.severity ?? 'LOW', weatherCondition: weather?.condition ?? 'CLEAR' };
-  }
-  search(query) { const q = String(query ?? '').trim().toLowerCase(); if (!q) return []; const sources = [['Flight', this.flights()], ['Gate', this.gates()], ['Runway', this.gates()], ['Passenger', this.passengers()], ['Baggage', this.baggage()], ['Employee', this.employees()], ['Facility', this.facilities()], ['Equipment', this.equipment()], ['Ground Task', this.groundTasks()]]; return sources.flatMap(([type, items]) => items.filter(item => JSON.stringify(item).toLowerCase().includes(q)).slice(0, 10).map(item => ({ type, item }))); }
-  metadata(key) { return this.dataRegistry?.get?.(key, { withMetadata: true }) ?? null; }
+  kpis() { const flights=this.flights(), passengers=this.passengers(), bags=this.baggage(), tasks=this.groundTasks(), employees=this.employees(), facilities=this.facilities(), equipment=this.equipment(), weather=this.weather(); const delayed=flights.filter(f=>['DELAYED','DELAY'].includes(String(f.status??f.state).toUpperCase())).length; const active=passengers.filter(p=>!['COMPLETED','CLAIMED'].includes(String(p.status??'').toUpperCase())).length; const failed=equipment.filter(e=>String(e.status??'').toUpperCase()==='FAILED').length; const maintenance=this.maintenance().filter(m=>!['COMPLETED','CANCELLED'].includes(String(m.status??'').toUpperCase())).length; return { activeFlights:flights.length, delayedFlights:delayed, totalPassengers:passengers.length, activePassengers:active, totalBaggage:bags.length, activeGroundTasks:tasks.filter(t=>!['COMPLETED','CANCELLED'].includes(String(t.status??'').toUpperCase())).length, employees:employees.length, failedEquipment:failed, maintenanceQueue:maintenance, facilities:facilities.length, capacityLoss:facilities.reduce((n,f)=>n+Math.max(0,Number(f.maxCapacity??f.capacity??0)-Number(f.availableCapacity??f.capacity??0)),0), weatherSeverity:weather?.severity??'LOW', weatherCondition:weather?.condition??'CLEAR' }; }
+  search(query) { const q=String(query??'').trim().toLowerCase(); if(!q)return[]; const sources=[['Flight',this.flights()],['Gate',this.gates()],['Runway',this.runways()],['Passenger',this.passengers()],['Baggage',this.baggage()],['Employee',this.employees()],['Facility',this.facilities()],['Equipment',this.equipment()],['Ground Task',this.groundTasks()]]; return sources.flatMap(([type,items])=>items.filter(item=>JSON.stringify(item).toLowerCase().includes(q)).slice(0,10).map(item=>({type,item}))); }
+  metadata(key) { return this.dataRegistry?.get?.(key,{withMetadata:true})??null; }
 }
-export const createOperationsQuery = (options) => new OperationsQuery(options);
+export const createOperationsQuery = options => new OperationsQuery(options);
