@@ -29,7 +29,8 @@ export class DailyAirportScheduler {
     }
   }
   scheduleMaintenanceEvents(day) {
-    for (const task of this.runtime.facilitySystem.listMaintenanceTasks()) {
+    const tasks = typeof this.runtime.facilitySystem.listMaintenanceTasks === 'function' ? this.runtime.facilitySystem.listMaintenanceTasks() : [];
+    for (const task of tasks) {
       const at = task.nextMaintenance ? new Date(task.nextMaintenance) : new Date(day.getTime() + 3 * 3600000);
       if (at >= day && at < new Date(day.getTime() + 86400000)) this.runtime.eventEngine.schedule({ eventType: 'MAINTENANCE_DUE', category: EVENT_CATEGORIES.SCHEDULED, at, sourceType: 'MaintenanceTask', sourceId: task.maintenanceId, payload: { maintenanceId: task.maintenanceId }, handler: () => this.runtime.facilitySystem.startMaintenance?.(task.maintenanceId) });
     }
